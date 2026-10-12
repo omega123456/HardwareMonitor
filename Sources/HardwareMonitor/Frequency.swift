@@ -38,6 +38,10 @@ final class Frequency {
         return Metrics.clocks(System.current.ioReportDelta(previous, now), tables: tables, hasSuper: hasSuper)
     }
 
+    func rebase() {
+        if let subscription { previous = System.current.ioReportSample(subscription) }
+    }
+
     /// Whether IOReport has any CPU performance-state channel (for the `--log-events` launch line, R-24).
     static var available: Bool { System.current.ioReportChannelCount() > 0 }
 

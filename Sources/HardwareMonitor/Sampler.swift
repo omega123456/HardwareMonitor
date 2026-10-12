@@ -5,6 +5,7 @@ import Foundation
 /// debounce and histories; pause and resume (R-21). Readers never schedule anything.
 final class Sampler {
     static let interval: TimeInterval = 1, diskInterval: TimeInterval = 60, panelInterval: TimeInterval = 1
+    static let topRounds = 6
 
     /// Called after anything shown may have changed.
     var onChange: () -> Void = {}
@@ -22,6 +23,7 @@ final class Sampler {
     private let ps = Processes(.ps), top = Processes(.top)
     /// Created on the first panel open (DVFS tables and the IOReport subscription, DD-3).
     private var frequency: Frequency?
+    private var rounds = 0, topBusy = false
     private var ticks = 0
 
     // R-3a: one debounce per reading.
@@ -117,12 +119,14 @@ final class Sampler {
 
     // MARK: Panel-only work (R-11): zero cost while the panel is closed
 
-    /// The panel opened with `rows` per list (0: the processes tile is left out): a round at once (`ps`, `top` and the
-    /// clock baseline), then one every 1 s from each round's start.
+    /// The panel opened with `rows` per list (0: the processes tile is left out): a round at once (`ps` and the clock
+    /// baseline), then one every 1 s from each round's start; `top` from the second round, every `topRounds`.
     func panelOpened(rows: Int) {
         guard !paused, extras == nil else { return }
         if frequency == nil { frequency = Frequency(generation: thermal.chip.generation) }
         extras = PanelExtras(rows: rows)
+        rounds = 0
+        topBusy = false
         round()
     }
 
@@ -138,16 +142,21 @@ final class Sampler {
         extras = nil
     }
 
-    /// One round: `ps` and `top` (single flight each; skipped when the processes tile is left out), one clock sample
-    /// (the first after opening is the baseline), the next round 1 s after this one started.
+    /// One round: `ps`, and `top` every `topRounds` (single flight each; skipped when the processes tile is left out),
+    /// one clock sample (the first after opening is the baseline; a window that started while `top` ran only
+    /// re-baselines and the rows keep the last clean reading, R-13), the next round 1 s after this one started.
     private func round() {
         guard let rows = extras?.rows else { return }
         let started = Env.now()
         if rows > 0 { // the processes tile is shown
             ps.start(slots: rows) { [weak self] in self?.listed($0, memory: false) }
-            top.start(slots: rows) { [weak self] in self?.listed($0, memory: true) }
+            if rounds % Self.topRounds == 1 { top.start(slots: rows) { [weak self] in self?.listed($0, memory: true) } }
         }
-        if let frequency { extras?.clocks = frequency.sample() }
+        if let frequency {
+            if topBusy { frequency.rebase() } else { extras?.clocks = frequency.sample() }
+        }
+        topBusy = top.inFlight
+        rounds += 1
         roundTimer = Env.at(started.addingTimeInterval(Self.panelInterval)) { [weak self] in self?.round() }
         onChange()
     }

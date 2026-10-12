@@ -188,6 +188,7 @@ extension Desktop {
             #expect(item.panelView.frame.size == CGSize(width: 368, height: 679)) // layout B with 8 rows
             item.itemTracker.entered() // already open: nothing
             #expect(h.armed.filter { $0 == 0.3 }.isEmpty)
+            h.advance(1)
             await h.until { sampler.extras?.memory != .measuring }
             #expect(item.panelView.panel?.content.lists?.last?.rows.first == .init(name: "com.docker.sailo", value: "9.0 GB"))
             item.closePanel("test", animated: false)
@@ -260,6 +261,7 @@ extension Desktop {
             for (i, (why, close)) in paths.enumerated() {
                 item.handle(mouseUp(.leftMouseUp))
                 #expect(item.panelOpen, "\(why)")
+                h.advance(1)
                 await h.until { h.launches("ps").count == i + 1 && h.launches("top").count == i + 1 }
                 let pids = [h.launches("ps")[i], h.launches("top")[i]]
                 close()
@@ -294,6 +296,7 @@ extension Desktop {
             item.handle(mouseUp(.leftMouseUp))
             #expect(sampler.extras?.rows == 5 && item.panelView.frame.height == 619)
             #expect(item.panelView.panel?.content.lists?.map(\.note) == ["5 of 8", "5 of 8"])
+            h.advance(1)
             await h.until { sampler.extras?.memory != .measuring && sampler.extras?.cpu != .blank }
             #expect(item.panelView.panel?.content.lists?.map(\.rows.count) == [5, 5])
             item.handle(mouseUp(.leftMouseUp))

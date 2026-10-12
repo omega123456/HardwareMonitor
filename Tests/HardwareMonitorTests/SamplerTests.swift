@@ -202,8 +202,8 @@ extension Desktop {
 
         // MARK: Panel-only work (R-11)
 
-        /// Opening starts `ps`, `top` and the clock baseline at once, then a round every 1 s from each round's start;
-        /// nothing panel-only exists before the first open or after a close.
+        /// Opening starts `ps` and the clock baseline at once, `top` from the second round, then a round every 1 s from
+        /// each round's start; nothing panel-only exists before the first open or after a close.
         @Test func panelRounds() async {
             let sampler = Sampler()
             var changes = 0
@@ -217,17 +217,16 @@ extension Desktop {
             #expect(h.system.subscriptions == 1 && h.system.samples == 1) // the baseline, at once
             #expect(sampler.extras?.clocks.map(\.label) == ["Super", "Performance"] && sampler.extras?.clocks.allSatisfy { $0.measuring } == true)
             #expect(sampler.extras?.cpu == .blank && sampler.extras?.memory == .measuring)
-            #expect(h.armed == [0.25, 0.75, 4.75, 4.75, 59.25]) // the tick; re-armed 1 s after the round started; the 5 s process timeouts
-            await h.until { h.launches("ps").count == 1 && h.launches("top").count == 1 && sampler.extras?.memory != .measuring
-                && sampler.extras?.cpu != .blank }
-            #expect(sampler.extras?.cpu == .rows(Fixture.procs().cpu) && sampler.extras?.memory == .rows(Fixture.procs().memory))
-            #expect(changes >= 3)
+            #expect(h.armed == [0.25, 0.75, 4.75, 59.25]) // the tick; re-armed 1 s after the round started; the 5 s `ps` timeout
+            await h.until { h.launches("ps").count == 1 && sampler.extras?.cpu != .blank }
+            #expect(sampler.extras?.cpu == .rows(Fixture.procs().cpu) && sampler.extras?.memory == .measuring)
+            #expect(h.launches("top").isEmpty && changes >= 2)
 
             h.advance(0.75) // to the second round's start; its sample takes 0.25 s
             #expect(h.system.samples == 2 && sampler.extras?.clocks.map(\.mhz) == [2500, 1900])
             #expect(h.armed == [0.5, 1, 5, 5, 58.5]) // the tick, the next round 1 s after this one started (not after it ended)
-            await h.until { h.launches("ps").count == 2 && h.launches("top").count == 2 }
-            #expect(h.launches("ps").count == 2 && h.launches("top").count == 2)
+            await h.until { h.launches("ps").count == 2 && h.launches("top").count == 1 && sampler.extras?.memory != .measuring }
+            #expect(sampler.extras?.memory == .rows(Fixture.procs().memory))
             await settle(0.2)
 
             sampler.panelClosed()
@@ -235,7 +234,7 @@ extension Desktop {
             h.system.onSample = {}
             h.advance(30)
             await settle(0.2)
-            #expect(h.launches("ps").count == 2 && h.launches("top").count == 2 && h.system.samples == 2)
+            #expect(h.launches("ps").count == 2 && h.launches("top").count == 1 && h.system.samples == 2)
 
             // Reopening: a new baseline (the dropped sample isn't reused), the lists measure again, the
             // subscription is kept.
@@ -244,28 +243,31 @@ extension Desktop {
             #expect(h.system.subscriptions == 1 && h.system.deltas.count == 1)
             sampler.panelOpened(rows: 5) // already open: nothing
             #expect(sampler.extras?.rows == 8)
-            await h.until { h.launches("top").count == 3 }
+            await h.until { h.launches("ps").count == 3 }
             sampler.panelClosed()
             sampler.panelClosed()
             await settle(0.2)
         }
 
-        /// A slow `top` (1.6 s) is never overlapped by the 1 s rounds; `ps` runs every round.
-        @Test func slowTopIsNeverOverlapped() async {
-            Processes.commands[.top] = h.script("top", "sleep 1.6; cat <<'EOF'\n\(Fixture.topText)\nEOF")
+        @Test func topCadenceAndClockWindows() async {
             let sampler = Sampler()
             sampler.start()
             sampler.panelOpened(rows: 8)
-            await h.until { h.launches("top").count == 1 && sampler.extras?.cpu != .blank } // ps is done, top sleeps
+            await h.until { sampler.extras?.cpu != .blank }
+            #expect(h.launches("top").isEmpty && h.system.samples == 1)
             h.advance(1)
-            await h.until { h.launches("ps").count == 2 }
+            #expect(h.system.deltas.map { [$0.0, $0.1] } == [[1, 2]] && sampler.extras?.clocks.map(\.mhz) == [2500, 1900])
+            await h.until { h.launches("top").count == 1 && sampler.extras?.memory != .measuring }
+            h.advance(1)
+            #expect(h.system.samples == 3 && h.system.deltas.count == 1 && sampler.extras?.clocks.map(\.mhz) == [2500, 1900])
+            h.advance(1)
+            #expect(h.system.deltas.map { [$0.0, $0.1] } == [[1, 2], [3, 4]])
+            h.advance(3)
             await settle(0.2)
-            #expect(h.launches("top").count == 1) // still in flight: skipped
-            await h.until { sampler.extras?.memory != .measuring }
-            #expect(sampler.extras?.memory == .rows(Fixture.procs().memory))
+            #expect(h.launches("top").count == 1 && h.system.deltas.count == 5)
             h.advance(1)
-            await h.until { h.launches("top").count == 2 && h.launches("ps").count == 3 }
-            #expect(h.launches("top").count == 2 && h.launches("ps").count == 3)
+            await h.until { h.launches("top").count == 2 }
+            #expect(h.launches("top").count == 2)
             sampler.panelClosed()
         }
 
@@ -275,6 +277,7 @@ extension Desktop {
             let sampler = Sampler()
             sampler.start()
             sampler.panelOpened(rows: 8)
+            h.advance(1)
             await h.until { h.launches("ps").count == 1 && h.launches("top").count == 1 }
             let pids = h.launches("ps") + h.launches("top")
             sampler.pause() // leaving visible closes the panel work too
