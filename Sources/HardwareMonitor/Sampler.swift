@@ -1,0 +1,182 @@
+import Foundation
+
+/// The single scheduler and the source of truth for what is shown (DD-2): the 1 s tick, the 60 s disk read, the
+/// event re-reads and, only while the panel is open, the 1 s panel round, all through `Env` one-shots (DD-4); R-3a
+/// debounce and histories; pause and resume (R-21). Readers never schedule anything.
+final class Sampler {
+    static let interval: TimeInterval = 1, diskInterval: TimeInterval = 60, panelInterval: TimeInterval = 1
+
+    /// Called after anything shown may have changed.
+    var onChange: () -> Void = {}
+    private(set) var snapshot = Snapshot()
+    private(set) var paused = false
+    /// What only the open panel shows; nil while it is closed (R-11).
+    private(set) var extras: PanelExtras?
+
+    private let smc = SMC()
+    private let thermal: Thermal
+    private let cpu = CPU()
+    private let gpu = GPU()
+    private let power: Power
+    private var tickTimer: Cancellable?, diskTimer: Cancellable?, roundTimer: Cancellable?
+    private let ps = Processes(.ps), top = Processes(.top)
+    /// Created on the first panel open (DVFS tables and the IOReport subscription, DD-3).
+    private var frequency: Frequency?
+    private var ticks = 0
+
+    // R-3a: one debounce per reading.
+    private var cpuUsage = Debounced<Int>(), gpuUsage = Debounced<Int>()
+    private var cpuTemp = Debounced<Double>(), gpuTemp = Debounced<Double>()
+    private var memory = Debounced<MemoryReading>()
+    private var system = Debounced<Double>(), dcIn = Debounced<Double>(), battery = Debounced<Double>()
+    private var disk = Debounced<DiskReading>()
+
+    init() {
+        thermal = Thermal(smc: smc)
+        power = Power(smc: smc)
+        EventLog.write("launch: chip \(thermal.chip.name), SMC \(smc.isOpen ? "available" : "unavailable"), "
+                       + "IOReport \(Frequency.available ? "available" : "unavailable"), "
+                       + "CPU keys \(thermal.cpuKeys.count), GPU keys \(thermal.gpuKeys.count)")
+        // R-2: events re-read at once and redraw, without waiting for the tick.
+        Memory.observe { [weak self] in self?.pressureChanged() }
+        Power.observe { [weak self] in self?.powerChanged() }
+    }
+
+    /// Launch (R-1): the power state, the disk and one tick at once (it sets the CPU baseline), then the cadence. A
+    /// launch while not visible does nothing here; `resume` runs the same steps on return.
+    func start() {
+        guard !paused else { return }
+        snapshot.source = Power.source()
+        readDisk()
+        tick()
+    }
+
+    /// Leaving visible (R-21): every timer is cancelled and later events are ignored.
+    func pause() {
+        panelClosed()
+        paused = true
+        tickTimer?.cancel()
+        diskTimer?.cancel()
+        tickTimer = nil
+        diskTimer = nil
+    }
+
+    /// Returning to visible (R-21): redraw from the last snapshot, clear the histories (the peak never spans sleep),
+    /// re-read the power state and adapter rating, then one tick and one disk read at once, which re-arm the cadence.
+    func resume() {
+        guard paused else { return }
+        paused = false
+        onChange()
+        snapshot.cpuHistory.clear()
+        snapshot.gpuHistory.clear()
+        cpu.reset()
+        snapshot.source = Power.source()
+        readDisk()
+        tick()
+    }
+
+    /// Closes the SMC connection at quit (R-9).
+    func close() { smc.close() }
+
+    /// One tick (R-1): every per-tick reading, one snapshot stamped with the tick time, the histories, the next
+    /// one-shot 1 s later.
+    private func tick() {
+        let started = DispatchTime.now().uptimeNanoseconds
+        var s = snapshot
+        switch cpu.read() {
+        case .percent(let p):
+            s.cpu = cpuUsage.update(p)
+            s.cpuHistory.append(p)
+        case .noBaseline: // keeps the last value; a gap in the history
+            s.cpuHistory.append(nil)
+        case .failed:
+            s.cpu = cpuUsage.update(nil)
+            s.cpuHistory.append(nil)
+        }
+        let g = gpu.read()
+        s.gpu = gpuUsage.update(g)
+        s.gpuHistory.append(g)
+        let t = thermal.read()
+        s.cpuTemp = cpuTemp.update(t.cpu)
+        s.gpuTemp = gpuTemp.update(t.gpu)
+        s.memory = memory.update(Memory.read())
+        let p = power.read()
+        s.system = system.update(p.system)
+        s.dcIn = dcIn.update(p.dcIn)
+        s.battery = battery.update(p.battery)
+        s.time = Env.now()
+        snapshot = s
+        ticks += 1
+        if ticks % 60 == 0 {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
+            EventLog.write("tick: #\(ticks) took \(String(format: "%.2f", ms)) ms")
+        }
+        tickTimer = Env.after(Self.interval) { [weak self] in self?.tick() }
+        onChange()
+    }
+
+    // MARK: Panel-only work (R-11): zero cost while the panel is closed
+
+    /// The panel opened with `rows` per list (0: the processes tile is left out): a round at once (`ps`, `top` and the
+    /// clock baseline), then one every 1 s from each round's start.
+    func panelOpened(rows: Int) {
+        guard !paused, extras == nil else { return }
+        if frequency == nil { frequency = Frequency(generation: thermal.chip.generation) }
+        extras = PanelExtras(rows: rows)
+        round()
+    }
+
+    /// Any close path: cancels the cadence, terminates `ps`/`top`, discards late results, drops the clock sample and
+    /// the extras.
+    func panelClosed() {
+        guard extras != nil else { return }
+        roundTimer?.cancel()
+        roundTimer = nil
+        ps.cancel()
+        top.cancel()
+        frequency?.reset()
+        extras = nil
+    }
+
+    /// One round: `ps` and `top` (single flight each; skipped when the processes tile is left out), one clock sample
+    /// (the first after opening is the baseline), the next round 1 s after this one started.
+    private func round() {
+        guard let rows = extras?.rows else { return }
+        let started = Env.now()
+        if rows > 0 { // the processes tile is shown
+            ps.start(slots: rows) { [weak self] in self?.listed($0, memory: false) }
+            top.start(slots: rows) { [weak self] in self?.listed($0, memory: true) }
+        }
+        if let frequency { extras?.clocks = frequency.sample() }
+        roundTimer = Env.at(started.addingTimeInterval(Self.panelInterval)) { [weak self] in self?.round() }
+        onChange()
+    }
+
+    private func listed(_ rows: [ProcessRow]?, memory: Bool) {
+        guard extras != nil else { return }
+        let list = rows.map(PanelExtras.List.rows) ?? .unavailable
+        if memory { extras?.memory = list } else { extras?.cpu = list }
+        onChange()
+    }
+
+    /// R-8: the boot volume, then the next read 60 s later.
+    private func readDisk() {
+        snapshot.disk = disk.update(Disk.read())
+        diskTimer = Env.after(Self.diskInterval) { [weak self] in
+            self?.readDisk()
+            self?.onChange()
+        }
+    }
+
+    private func pressureChanged() {
+        guard !paused else { return }
+        snapshot.memory = memory.update(Memory.read())
+        onChange()
+    }
+
+    private func powerChanged() {
+        guard !paused else { return }
+        snapshot.source = Power.source()
+        onChange()
+    }
+}

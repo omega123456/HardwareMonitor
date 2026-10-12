@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish-macos:
+    permissions:
+      contents: write
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import HardwareMonitor code signing certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          EXPECTED_APPLE_CERTIFICATE_SHA1: 3076598D6BED258005F3DF61EAFB49EDE3106EEB
+        run: |
+          set -euo pipefail
+
+          : "${APPLE_CERTIFICATE:?Missing APPLE_CERTIFICATE secret. Export HardwareMonitor Local Signing as a base64-encoded .p12.}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?Missing APPLE_CERTIFICATE_PASSWORD secret.}"
+          : "${KEYCHAIN_PASSWORD:?Missing KEYCHAIN_PASSWORD secret.}"
+
+          printf '%s' "$APPLE_CERTIFICATE" > certificate-base64.txt
+          openssl base64 -d -A -in certificate-base64.txt -out certificate.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security list-keychains -d user -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-certificate -c "HardwareMonitor Local Signing" -p build.keychain > certificate.cer
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain certificate.cer
+          rm -f certificate-base64.txt certificate.p12 certificate.cer
+
+          identities="$(security find-identity -v -p codesigning build.keychain)"
+          printf '%s\n' "$identities"
+          if [[ "$identities" != *"$EXPECTED_APPLE_CERTIFICATE_SHA1"*"HardwareMonitor Local Signing"* ]]; then
+            echo "[release] Imported certificate does not match HardwareMonitor Local Signing (${EXPECTED_APPLE_CERTIFICATE_SHA1})."
+            exit 1
+          fi
+
+      - name: Check tag matches Info.plist version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "[release] Tag $GITHUB_REF_NAME does not match Info.plist version $version."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Self-test
+        run: swift run HardwareMonitor --self-test
+
+      - name: Build and sign HardwareMonitor.app
+        run: BUNDLE_ONLY=1 ./scripts/build-app.sh
+
+      - name: Verify macOS code signing requirement
+        shell: bash
+        env:
+          EXPECTED_APPLE_CERTIFICATE_SHA1: 3076598d6bed258005f3df61eafb49ede3106eeb
+        run: |
+          set -euo pipefail
+          requirement="$(codesign -d -r- .build/HardwareMonitor.app 2>&1)"
+          printf '%s\n' "$requirement"
+          if [[ "$requirement" != *"certificate leaf = H\"${EXPECTED_APPLE_CERTIFICATE_SHA1}\""* ]]; then
+            echo "[release] HardwareMonitor.app was not signed by the expected HardwareMonitor Local Signing certificate."
+            echo "[release] Installed copies would refuse this update: the updater only installs builds signed by the same leaf (HardwareMonitor needs no TCC grant)."
+            exit 1
+          fi
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Zip: what the in-app updater downloads.
+          zip="HardwareMonitor-${VERSION}.zip"
+          ditto -c -k --keepParent .build/HardwareMonitor.app "$zip"
+
+          # DMG: drag-to-install window (HardwareMonitor.app beside an Applications link, fixed icon view) with the
+          # app icon as the volume icon. Finder writes the layout (.DS_Store) via AppleScript, like Tauri's bundle_dmg.sh.
+          dmg="HardwareMonitor-${VERSION}.dmg"
+          vol="HardwareMonitor ${VERSION}"
+          stage="$RUNNER_TEMP/dmg"
+          rw="$RUNNER_TEMP/rw.dmg"
+          mkdir -p "$stage"
+          ditto .build/HardwareMonitor.app "$stage/HardwareMonitor.app"
+          ln -s /Applications "$stage/Applications"
+          cp Resources/AppIcon.icns "$stage/.VolumeIcon.icns"
+          for attempt in 1 2 3; do # hdiutil intermittently fails with "Resource busy" on hosted runners
+            hdiutil create -volname "$vol" -srcfolder "$stage" -fs HFS+ -format UDRW -ov "$rw" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
+          mnt="$(hdiutil attach -readwrite -noverify -noautoopen "$rw" | awk -F'\t' '/Apple_HFS/ {print $NF}')"
+          SetFile -c icnC "$mnt/.VolumeIcon.icns"
+          SetFile -a C "$mnt"
+          osascript <<EOF
+          tell application "Finder"
+              tell disk "$vol"
+                  open
+                  set current view of container window to icon view
+                  set toolbar visible of container window to false
+                  set statusbar visible of container window to false
+                  set the bounds of container window to {200, 120, 860, 520}
+                  set opts to the icon view options of container window
+                  set arrangement of opts to not arranged
+                  set icon size of opts to 128
+                  set position of item "HardwareMonitor.app" of container window to {170, 180}
+                  set position of item "Applications" of container window to {490, 180}
+                  close
+                  open
+                  update without registering applications
+                  delay 2
+                  close
+              end tell
+          end tell
+          EOF
+          sync
+          if [ ! -f "$mnt/.DS_Store" ]; then
+            echo "[release] Finder did not write the DMG window layout."
+            exit 1
+          fi
+          hdiutil detach "$mnt" || { sleep 2; hdiutil detach -force "$mnt"; }
+          hdiutil convert "$rw" -format UDZO -ov -o "$dmg"
+
+          notes=.github/release-body.md
+          [ -f "$notes" ] || { echo "Open HardwareMonitor-${VERSION}.dmg and drag HardwareMonitor to Applications." > "$RUNNER_TEMP/notes.md"; notes="$RUNNER_TEMP/notes.md"; }
+          gh release create "$GITHUB_REF_NAME" "$dmg" "$zip" --title "HardwareMonitor $GITHUB_REF_NAME" --notes-file "$notes"

@@ -1,0 +1,237 @@
+import AppKit
+import Security
+
+/// Self-update from GitHub Releases (R-23): checked at launch and hourly unless turned off, or on demand from the menu.
+/// Dialogs are CFUserNotifications: shown by the system, so HardwareMonitor never becomes active. A download is installed
+/// only if it satisfies the running app's own designated requirement (same identifier, same "HardwareMonitor Local Signing"
+/// leaf certificate, DD-13). HardwareMonitor needs no TCC grant: the leaf check only keeps updates trusted.
+/// The hourly check is skipped while HardwareMonitor is not visible (R-21); a missed one runs on return.
+enum Updater {
+    static let repo = "omega123456/HardwareMonitor"
+    private static let disabledKey = "autoUpdateDisabled"
+    private static var timer: Timer?
+    private static var busy = false // a check, prompt or install is in progress
+    private(set) static var paused = false
+    private static var missed = false
+    private static var prompt: (note: CFUserNotification, source: CFRunLoopSource, onUpdate: () -> Void)?
+
+    static var isEnabled: Bool { !Env.defaults.bool(forKey: disabledKey) }
+    static var current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    /// The bundle an update replaces. Tests point it, and the seams below, at fakes.
+    static var bundleURL = Bundle.main.bundleURL
+    static var session = URLSession.shared
+    /// `swift run` has no .app bundle: nothing to replace. Debug builds are HardwareMonitor Dev and never update.
+    #if DEBUG
+    static var isInstallable = false
+    private static let notInstallableReason = "This is a development build."
+    #else
+    static var isInstallable = bundleURL.pathExtension == "app"
+    private static let notInstallableReason = "This copy of HardwareMonitor is not an installed app."
+    #endif
+
+    static func start() {
+        guard isEnabled, isInstallable, timer == nil else { return }
+        scheduledCheck()
+        // The one repeating timer HardwareMonitor has (production only, DD-4).
+        let t = Timer(timeInterval: 3600, repeats: true) { _ in scheduledCheck() }
+        t.tolerance = 60
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    private static func scheduledCheck() {
+        if paused { missed = true } else { check(manual: false) }
+    }
+
+    /// Not visible (R-21): the hourly check only notes that it was missed.
+    static func pause() { paused = true }
+
+    /// Returning to visible (R-21, step 6): a missed check runs now.
+    static func resume() {
+        paused = false
+        if missed {
+            missed = false
+            check(manual: false)
+        }
+    }
+
+    static func toggle() {
+        Env.defaults.set(isEnabled, forKey: disabledKey)
+        EventLog.write("automatic updates \(isEnabled ? "on" : "off")")
+        if isEnabled { start() } else { timer?.invalidate(); timer = nil }
+    }
+
+    private struct Release: Decodable {
+        struct Asset: Decodable { let name: String; let browser_download_url: URL }
+        let tag_name: String
+        let assets: [Asset]
+    }
+
+    static func check(manual: Bool) {
+        guard isInstallable else { if manual { notice("Updates unavailable", notInstallableReason) }; return }
+        guard !busy else { return }
+        busy = true
+        var request = URLRequest(url: URL(string: "https://api.github.com/repos/\(repo)/releases/latest")!)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        session.dataTask(with: request) { data, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let release = status == 200 ? data.flatMap { try? JSONDecoder().decode(Release.self, from: $0) } : nil
+            DispatchQueue.main.async {
+                busy = false
+                guard let release else {
+                    EventLog.write("update check failed: status=\(status) \(error.map { "\($0)" } ?? "")")
+                    if manual { notice("Couldn't check for updates", error?.localizedDescription ?? "GitHub returned status \(status).") }
+                    return
+                }
+                let version = String(release.tag_name.trimmingPrefix("v"))
+                guard isNewer(version, than: current),
+                      let zip = release.assets.first(where: { $0.name.hasSuffix(".zip") })?.browser_download_url else {
+                    EventLog.write("update check: \(current) is current (latest \(version))")
+                    if manual { notice("HardwareMonitor is up to date", "You have the latest version, \(current).") }
+                    return
+                }
+                EventLog.write("update available: \(version)")
+                ask(version) { install(zip, version: version) }
+            }
+        }.resume()
+    }
+
+    // MARK: Dialogs
+
+    private static var iconURL: URL? { Bundle.main.url(forResource: "AppIcon", withExtension: "icns") }
+
+    static var ask: (_ version: String, _ onUpdate: @escaping () -> Void) -> Void = showPrompt
+
+    private static func showPrompt(_ version: String, onUpdate: @escaping () -> Void) {
+        var dict: [CFString: Any] = [
+            kCFUserNotificationAlertHeaderKey: "HardwareMonitor \(version) is available",
+            kCFUserNotificationAlertMessageKey: "You have \(current). Do you want to update now?",
+            kCFUserNotificationDefaultButtonTitleKey: "Update Now",
+            kCFUserNotificationAlternateButtonTitleKey: "Later",
+        ]
+        if let iconURL { dict[kCFUserNotificationIconURLKey] = iconURL as CFURL }
+        var err: Int32 = 0
+        guard let note = CFUserNotificationCreate(nil, 0, kCFUserNotificationNoteAlertLevel, &err, dict as CFDictionary),
+              let source = CFUserNotificationCreateRunLoopSource(nil, note, { _, flags in
+                  guard let p = Updater.prompt else { return }
+                  CFRunLoopRemoveSource(CFRunLoopGetMain(), p.source, .commonModes)
+                  Updater.prompt = nil
+                  Updater.busy = false
+                  if flags & 0x3 == CFOptionFlags(kCFUserNotificationDefaultResponse) { p.onUpdate() }
+              }, 0)
+        else { EventLog.write("update prompt failed: \(err)"); return }
+        busy = true // until answered: no second prompt from the hourly check
+        prompt = (note, source, onUpdate)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+    }
+
+    /// One-button, non-blocking.
+    static var notice: (_ header: String, _ message: String) -> Void = { header, message in
+        CFUserNotificationDisplayNotice(0, kCFUserNotificationPlainAlertLevel, iconURL as CFURL?, nil, nil,
+                                        header as CFString, message as CFString, "OK" as CFString)
+    }
+
+    // MARK: Install
+
+    private struct UpdateError: LocalizedError {
+        let errorDescription: String?
+        init(_ message: String) { errorDescription = message }
+    }
+
+    private static func install(_ zip: URL, version: String) {
+        busy = true
+        EventLog.write("update: downloading \(zip)")
+        session.downloadTask(with: zip) { file, _, error in
+            // The downloaded file is deleted when this returns, so unpack and verify here (off the main thread).
+            let result = Result { try unpack(file, error, version) }
+            DispatchQueue.main.async {
+                busy = false
+                switch result {
+                case .success(let app): replaceAndRelaunch(with: app)
+                case .failure(let e):
+                    EventLog.write("update failed: \(e)")
+                    notice("HardwareMonitor update failed", e.localizedDescription)
+                }
+            }
+        }.resume()
+    }
+
+    /// Download → <replacement dir on the app's volume>/HardwareMonitor.app, verified. Returns the new bundle.
+    private static func unpack(_ file: URL?, _ error: Error?, _ version: String) throws -> URL {
+        guard let file else { throw error ?? UpdateError("The download failed.") }
+        let fm = FileManager.default
+        let dir = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask,
+                             appropriateFor: bundleURL, create: true)
+        do {
+            let zip = dir.appendingPathComponent("update.zip")
+            try fm.moveItem(at: file, to: zip)
+            let ditto = Process()
+            ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            ditto.arguments = ["-x", "-k", zip.path, dir.path]
+            try ditto.run()
+            ditto.waitUntilExit()
+            guard ditto.terminationStatus == 0 else { throw UpdateError("The download could not be unpacked.") }
+            let app = dir.appendingPathComponent("HardwareMonitor.app")
+            try verify(app)
+            guard Bundle(url: app)?.infoDictionary?["CFBundleShortVersionString"] as? String == version else {
+                throw UpdateError("The download is not HardwareMonitor \(version).")
+            }
+            return app
+        } catch {
+            try? fm.removeItem(at: dir)
+            throw error
+        }
+    }
+
+    static var verify = verifySignature
+
+    /// The new bundle must be validly signed and satisfy this running app's designated requirement.
+    static func verifySignature(_ app: URL) throws {
+        var me: SecCode?, meStatic: SecStaticCode?, requirement: SecRequirement?, new: SecStaticCode?
+        guard SecCodeCopySelf([], &me) == errSecSuccess, let me,
+              SecCodeCopyStaticCode(me, [], &meStatic) == errSecSuccess, let meStatic,
+              SecCodeCopyDesignatedRequirement(meStatic, [], &requirement) == errSecSuccess, let requirement
+        else { throw UpdateError("This copy of HardwareMonitor has no usable code signature.") }
+        guard SecStaticCodeCreateWithPath(app as CFURL, [], &new) == errSecSuccess, let new,
+              SecStaticCodeCheckValidity(new, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures),
+                                         requirement) == errSecSuccess
+        else { throw UpdateError("The download is not signed by HardwareMonitor Local Signing.") }
+    }
+
+    private static func replaceAndRelaunch(with app: URL) {
+        let dest = bundleURL
+        do {
+            _ = try FileManager.default.replaceItemAt(dest, withItemAt: app)
+            try? FileManager.default.removeItem(at: app.deletingLastPathComponent())
+            try relaunch(dest)
+        } catch {
+            EventLog.write("update install failed: \(error)")
+            notice("HardwareMonitor update failed", error.localizedDescription)
+            return
+        }
+        EventLog.write("update installed, relaunching")
+        Env.terminate()
+    }
+
+    /// Waits for this process to exit, then opens the new bundle.
+    static var relaunch: (URL) throws -> Void = { dest in
+        let relaunch = Process()
+        relaunch.executableURL = URL(fileURLWithPath: "/bin/sh")
+        relaunch.arguments = ["-c", "while kill -0 \"$1\" 2>/dev/null; do sleep 0.2; done; open \"$0\"",
+                              dest.path, String(getpid())]
+        try relaunch.run()
+    }
+
+    // MARK: Pure logic (covered by --self-test)
+
+    /// Numeric dotted-version comparison; a leading "v" is ignored and missing components count as 0.
+    static func isNewer(_ remote: String, than local: String) -> Bool {
+        func parts(_ s: String) -> [Int] { s.trimmingPrefix("v").split(separator: ".").map { Int($0) ?? 0 } }
+        let r = parts(remote), l = parts(local)
+        for i in 0..<max(r.count, l.count) {
+            let a = i < r.count ? r[i] : 0, b = i < l.count ? l[i] : 0
+            if a != b { return a > b }
+        }
+        return false
+    }
+}

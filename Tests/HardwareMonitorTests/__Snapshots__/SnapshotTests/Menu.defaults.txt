@@ -1,0 +1,7 @@
+  HardwareMonitor Dev <version> (debug) (disabled)
+---
+  Launch at Login
+✓ Automatic Updates
+  Check for Updates…
+---
+  Quit HardwareMonitor
