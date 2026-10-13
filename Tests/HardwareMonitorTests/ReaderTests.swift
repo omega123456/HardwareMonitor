@@ -118,10 +118,10 @@ extension Desktop {
 
         @Test func powerKeys() {
             let power = Power(smc: SMC())
-            h.system.setInt16("B0AC", -1000, signed: true) // unsigned: the sign comes from the charging state
+            h.system.setInt16("B0AC", -1000, signed: true) // signed: negative while the battery drains
             h.system.setInt16("B0AV", 12000)
             let p = power.read(dcIn: true)
-            #expect(p.system == 14 && p.dcIn == 0 && p.battery == 12)
+            #expect(p.system == 14 && p.dcIn == 0 && p.battery == -12)
             h.system.valueFetches = []
             #expect(power.read(dcIn: false).dcIn == nil) // PDTR only for the open panel
             #expect(!h.system.valueFetches.contains("PDTR"))

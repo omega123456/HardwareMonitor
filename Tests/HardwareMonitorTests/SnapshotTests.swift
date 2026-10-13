@@ -17,6 +17,7 @@ extension Desktop {
             case memCritical, memCriticalLight, cpuWarm, cpuWarmLight, hotCPU, hotCPULight
             case lowDisk, lowDiskLight, diskCritical, diskCriticalLight, terabyte, terabyteLight
             case smcUnavailable, smcUnavailableLight, noBattery, noBatteryLight
+            case drainingConnected, drainingConnectedLight
             case normalNoDev, normalNoDevLight
             case normalContrast, memCriticalContrast, hotCPUContrast, normalLightContrast
 
@@ -37,6 +38,7 @@ extension Desktop {
                 case "terabyte": .terabyte
                 case "smcUnavailable": .smcUnavailable
                 case "noBattery": .noBattery
+                case "drainingConnected": .drainingConnected
                 default: .normal
                 }
             }
@@ -109,7 +111,7 @@ extension Desktop {
             case memWarningGpuMissing, memWarningGpuMissingLight, memCritical, memCriticalLight, cpuWarm, cpuWarmLight
             case hotCPU, hotCPULight, lowDisk, lowDiskLight, diskCritical, diskCriticalLight, terabyte, terabyteLight
             case lowDrawBattery, lowDrawBatteryLight, lowDrawConnected, lowDrawConnectedLight
-            case gpuGaps, shortHistory, stale, smcUnavailable, noBattery
+            case gpuGaps, shortHistory, stale, smcUnavailable, noBattery, drainingConnected
             case procsMemoryMeasuring, procsMemoryUnavailable, procsCPUUnavailable
             case clocksM1, clocksMeasuring, clocksUnavailable, shortScreen, shortScreenLeftOut
             case chargingContrast, chargingSolid
@@ -132,6 +134,7 @@ extension Desktop {
                 case "shortHistory": .shortHistory
                 case "smcUnavailable": .smcUnavailable
                 case "noBattery": .noBattery
+                case "drainingConnected": .drainingConnected
                 default: .normal
                 }
             }

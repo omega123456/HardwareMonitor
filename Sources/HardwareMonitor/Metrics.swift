@@ -91,7 +91,7 @@ struct Snapshot: Equatable {
     var memory: MemoryReading?
     var system: Double?   // PSTR, W
     var dcIn: Double?     // PDTR, W
-    var battery: Double?  // PPBR, W, unsigned (its sign comes from the charging state)
+    var battery: Double?  // B0AC × B0AV, W: positive while charging, negative while draining
     var source = PowerSource()
     var disk: DiskReading?
     var cpuHistory = History()
@@ -220,6 +220,10 @@ enum Metrics {
 
     // MARK: Power (R-7)
 
+    /// The battery drains (on battery, or connected while the load exceeds the charger) when its signed power rounds,
+    /// as `watts` shows it, below zero; a held battery's −0.04 W shows no sign (owner, 2026-10-13).
+    static func draining(_ battery: Double?) -> Bool { ((battery ?? 0) * 10).rounded() < 0 }
+
     static func powerState(hasBattery: Bool, connected: Bool, charging: Bool) -> PowerState {
         guard hasBattery else { return .noBattery }
         return !connected ? .onBattery : charging ? .charging : .connected
@@ -310,10 +314,14 @@ enum Metrics {
         let memory = Column(glyph: .memory,
                             top: s.memory.map { .init(text: "\($0.percent)", unit: "%", level: $0.level, strong: true) } ?? missing,
                             bottom: .bar(fill: s.memory?.fill, level: s.memory?.level ?? .normal))
-        // Battery power (PPBR), live and fg while connected (charging or held), as Stats; a dim "—" on battery and on a
-        // desktop. Deviation 3 (DC-in) reversed by the owner, 2026-10-12.
+        // Battery power, live and fg whenever a battery exists, as Stats; "−" while it drains (on battery, or connected
+        // while the load exceeds the charger), so on battery it no longer looks like a missing read. A dim "—" on a
+        // desktop. Deviation 3 (DC-in) reversed by the owner, 2026-10-12; the signed drain, owner, 2026-10-13.
+        func battery(_ w: Double) -> Column.Value {
+            draining(w) ? .init(text: "−" + Metrics.watts(-w).value, unit: "W", strong: true) : watts(w)
+        }
         let power = Column(glyph: .power, badge: state == .charging, top: watts(s.system),
-                           bottom: .value(state == .onBattery || state == .noBattery ? missing : watts(s.battery)))
+                           bottom: state == .noBattery ? .value(missing) : .value(s.battery.map(battery) ?? missing))
         let disk = Column(glyph: .disk,
                           top: s.disk.map { d in
                               let t = bytes(d.free)
@@ -364,11 +372,12 @@ enum Metrics {
         guard let system = s.system else { return "Power unavailable" }
         let head = "Power \(watts(system).value) watts"
         let battery = s.battery.map { watts($0).value }
+        let drain = draining(s.battery) ? s.battery.map { ", discharging \(watts(-$0).value) watts" } ?? "" : ""
         switch s.source.state {
         case .charging: return head + (battery.map { ", charging at \($0) watts" } ?? ", charging")
-        case .connected: return head + (battery.map { ", battery \($0) watts" } ?? "") + ", not charging"
+        case .connected: return head + (drain.isEmpty ? battery.map { ", battery \($0) watts" } ?? "" : drain) + ", not charging"
         case .noBattery: return head + ", no battery"
-        case .onBattery: return head + ", on battery"
+        case .onBattery: return head + ", on battery" + drain
         }
     }
 
@@ -824,19 +833,19 @@ extension Metrics {
         let percent = s.source.percent.map { "\($0)%" } ?? "—"
         let spokenPercent = s.source.percent.map { "\($0) percent" } ?? "percent unavailable"
         var battery: Run, spokenBattery: String
-        switch state {
-        case .noBattery:
+        switch (state, s.battery) {
+        case (.noBattery, _):
             (battery, spokenBattery) = (dash, "no battery")
-        case .connected:
+        case let (_, w?) where draining(w): // on battery, or connected while the load exceeds the charger
+            battery = Run(text: "−\(panelWatts(-w)) · \(percent)")
+            spokenBattery = "battery minus \(watts(-w).value) watts, \(spokenPercent)"
+        case (.connected, _):
             (battery, spokenBattery) = (Run(text: "Held at \(percent)"), "battery held at \(spokenPercent)")
-        case .charging, .onBattery:
-            let sign = state == .charging ? ("+", "plus") : ("−", "minus")
-            if let w = s.battery {
-                battery = Run(text: "\(sign.0)\(panelWatts(w)) · \(percent)")
-                spokenBattery = "battery \(sign.1) \(watts(w).value) watts, \(spokenPercent)"
-            } else {
-                (battery, spokenBattery) = (Run(text: percent), "battery \(spokenPercent)")
-            }
+        case let (_, w?):
+            battery = Run(text: "+\(panelWatts(w)) · \(percent)")
+            spokenBattery = "battery plus \(watts(w).value) watts, \(spokenPercent)"
+        case (_, nil):
+            (battery, spokenBattery) = (Run(text: percent), "battery \(spokenPercent)")
         }
         let adapter: Run, spokenAdapter: String
         if state == .onBattery {

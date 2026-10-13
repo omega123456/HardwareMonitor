@@ -195,7 +195,7 @@ enum SelfTest {
         s.memory = MemoryReading(used: 23 * 1_073_741_824, total: 32 * 1_073_741_824, percent: 72, level: .normal, fill: 18, swap: 0)
         s.system = 14
         s.dcIn = 0
-        s.battery = 14
+        s.battery = -14
         s.source = PowerSource(hasBattery: true, connected: false, charging: false, percent: 64)
         s.disk = DiskReading(free: 412_000_000_000, total: 926_000_000_000, name: "Macintosh HD")
         return s
@@ -223,7 +223,11 @@ enum SelfTest {
         check("five columns in order", c.map(\.glyph) == [.cpu, .gpu, .memory, .power, .disk])
         check("CPU top fg, bottom dim", c[0].top == .init(text: "38", unit: "%", strong: true) && c[0].bottom == .value(.init(text: "61", unit: "°")))
         check("memory bar", c[2].bottom == .bar(fill: 18, level: .normal))
-        check("on battery: battery dim —", c[3].bottom == .value(Metrics.missing) && !c[3].badge)
+        check("on battery: the drain, signed, fg", c[3].bottom == .value(.init(text: "−14", unit: "W", strong: true)) && !c[3].badge)
+        s.battery = -4.2
+        check("on battery: low drain, one decimal", Metrics.columns(s)[3].bottom == .value(.init(text: "−4.2", unit: "W", strong: true)))
+        s.battery = nil
+        check("on battery, battery missing: dim —", Metrics.columns(s)[3].bottom == .value(Metrics.missing))
         check("disk free over total", c[4].top.text == "412" && c[4].top.unit == "G" && c[4].bottom == .value(.init(text: "926", unit: "G")))
         s.source = PowerSource(hasBattery: true, connected: true, charging: true)
         s.dcIn = 61
@@ -238,6 +242,12 @@ enum SelfTest {
         check("connected: battery rounds then switches format", Metrics.columns(s)[3].bottom == .value(.init(text: "10", unit: "W", strong: true)))
         s.battery = nil
         check("connected, PPBR missing: dim —", Metrics.columns(s)[3].bottom == .value(Metrics.missing))
+        s.battery = -40
+        check("connected, load above the charger: the drain", !Metrics.columns(s)[3].badge
+              && Metrics.columns(s)[3].bottom == .value(.init(text: "−40", unit: "W", strong: true)))
+        s.battery = -0.04
+        check("held, a drain that rounds to 0.0: no sign", Metrics.columns(s)[3].bottom == .value(.init(text: "0.0", unit: "W", strong: true)))
+        check("draining at −0.05 W, not at −0.04 W", Metrics.draining(-0.05) && !Metrics.draining(-0.04) && !Metrics.draining(nil) && !Metrics.draining(3))
         s.battery = 1.1
         s.source = PowerSource()
         check("desktop: dim —, never a bolt", !Metrics.columns(s)[3].badge && Metrics.columns(s)[3].bottom == .value(Metrics.missing))
@@ -256,7 +266,7 @@ enum SelfTest {
     private static func accessibility() {
         var s = normal
         check("normal summary", Metrics.summary(s) == "CPU 38 percent, 61 degrees. GPU 12 percent, 54 degrees. "
-              + "Memory 72 percent, normal pressure. Power 14 watts, on battery. Disk 412 gigabytes free of 926")
+              + "Memory 72 percent, normal pressure. Power 14 watts, on battery, discharging 14 watts. Disk 412 gigabytes free of 926")
         check("one item's label", Metrics.phrase(.memory, s) == "Memory 72 percent, normal pressure"
               && Metrics.phrase(.cpu, s) == "CPU 38 percent, 61 degrees")
         s.cpu = 82
@@ -294,6 +304,11 @@ enum SelfTest {
         check("connected, not charging", Metrics.summary(s).contains("Power 20 watts, battery 1.1 watts, not charging. "))
         s.battery = nil
         check("connected, PPBR unavailable", Metrics.summary(s).contains("Power 20 watts, not charging. "))
+        s.system = 100
+        s.battery = -40
+        check("connected, load above the charger", Metrics.summary(s).contains("Power 100 watts, discharging 40 watts, not charging. "))
+        s.system = 20
+        s.battery = nil
         s.source = PowerSource()
         check("desktop", Metrics.summary(s).contains("Power 20 watts, no battery. "))
         s.system = 4.2
@@ -556,9 +571,12 @@ enum SelfTest {
         s.source = PowerSource(hasBattery: true, connected: true, charging: false, percent: 85, adapterWatts: 65)
         s.system = 4.4
         s.dcIn = 4.6
+        s.battery = 0.2
         t = Metrics.powerTile(s)
         check("power held, low draw", t.word == Run(text: "Idle", dim: true) && t.value.text == "4.4"
               && t.rows.map(\.value.text) == ["4.4 W", "Held at 85%", "4.6 W of 65 W"])
+        s.battery = -40
+        check("power connected, load above the charger: the drain", Metrics.powerTile(s).rows[1].value.text == "−40 W · 85%")
         s.source = PowerSource(hasBattery: true, connected: true, charging: true, percent: 78)
         s.battery = nil
         t = Metrics.powerTile(s)
@@ -613,12 +631,15 @@ enum SelfTest {
         check("Power tile, charging", Metrics.powerTile(s).label
               == "Power, 18 watts system draw, charging, battery plus 43 watts, 78 percent, adapter 61 watts of 65")
         s.system = 14
-        s.battery = 12
+        s.battery = -12
         s.source = PowerSource(hasBattery: true, connected: false, charging: false, percent: 64)
         check("Power tile, on battery", Metrics.powerTile(s).label
               == "Power, 14 watts system draw, on battery, battery minus 12 watts, 64 percent, adapter not connected")
         s.source = PowerSource(hasBattery: true, connected: true, percent: 85)
         s.dcIn = 21
+        check("Power tile, connected, draining", Metrics.powerTile(s).label
+              == "Power, 14 watts system draw, idle, battery minus 12 watts, 85 percent, adapter 21 watts")
+        s.battery = 0
         check("Power tile, held", Metrics.powerTile(s).label == "Power, 14 watts system draw, idle, battery held at 85 percent, adapter 21 watts")
         s.source = PowerSource()
         s.system = nil

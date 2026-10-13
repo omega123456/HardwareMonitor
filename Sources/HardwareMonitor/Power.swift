@@ -8,11 +8,11 @@ final class Power {
 
     init(smc: SMC) { self.smc = smc }
 
-    /// `PSTR` (system draw) and `PDTR` (DC-in; key names from exelban/Stats), and battery power, unsigned: `B0AC`
-    /// (battery current, mA, negative on battery) × `B0AV` (battery voltage, mV). Not `PPBR`: on an M5 Pro it reads
+    /// `PSTR` (system draw) and `PDTR` (DC-in; key names from exelban/Stats), and battery power, signed: `B0AC`
+    /// (battery current, mA, negative while the battery drains) × `B0AV` (battery voltage, mV). Not `PPBR`: on an M5 Pro it reads
     /// ~1 W while the battery charges at ~25 W. `PDTR` only when asked for (only the open panel shows it).
     func read(dcIn: Bool) -> (system: Double?, dcIn: Double?, battery: Double?) {
-        let battery = smc.value("B0AC").flatMap { mA in smc.value("B0AV").map { mV in abs(mA * mV) / 1e6 } }
+        let battery = smc.value("B0AC").flatMap { mA in smc.value("B0AV").map { mV in mA * mV / 1e6 } }
         return (smc.value("PSTR"), dcIn ? self.dcIn() : nil, battery)
     }
 

@@ -60,13 +60,14 @@ extension Desktop {
         /// R-14: every state draws at the same width (slots reserved at the widest text, critical mark included).
         @Test func everyStateHasTheSameWidth() {
             let fixtures: [Fixture] = [.normal, .charging, .heldConnected, .lowDrawBattery, .memWarningGpuMissing, .memCritical,
-                                       .cpuWarm, .hotCPU, .lowDisk, .diskCritical, .terabyte, .smcUnavailable, .noBattery]
+                                       .cpuWarm, .hotCPU, .lowDisk, .diskCritical, .terabyte, .smcUnavailable, .noBattery,
+                                       .drainingConnected]
             let columns = fixtures.map { f in
                 f.install(h.system)
                 return Metrics.columns(h.snapshot())
             }
-            #expect(Set(columns.map { Glance(columns: $0).width }) == [286]) // measured; the plan's target is ≤ 280 (reported to the owner)
-            #expect(Glance(columns: Metrics.columns(Snapshot()), dev: true).width == 321)
+            #expect(Set(columns.map { Glance(columns: $0).width }) == [293]) // measured; the plan's target is ≤ 280 (owner: 294, then 293 with the signed drain)
+            #expect(Glance(columns: Metrics.columns(Snapshot()), dev: true).width == 328)
             // Each item on its own: one width per metric in every state.
             for g in Column.Glyph.allCases {
                 #expect(Set(columns.map { Glance(columns: $0.filter { $0.glyph == g }).width }).count == 1, "\(g)")

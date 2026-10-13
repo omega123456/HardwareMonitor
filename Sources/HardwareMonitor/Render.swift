@@ -96,7 +96,7 @@ struct Glance: Equatable {
         return switch glyph {
         case .cpu, .gpu: max(w("100", "%"), w("120", "°", .critical, strong: false, top: false))
         case .memory: max(w("100", "%", .critical), 22)
-        case .power: max(w("188", "W"), w("8.8", "W"))
+        case .power: max(w("188", "W"), w("8.8", "W"), w("−188", "W", top: false)) // the battery's drain (owner, 2026-10-13)
         case .disk: max(w("999", "G", .critical), w("9.9", "T", .critical), w("999", "G", strong: false, top: false),
                         w("9.9", "T", strong: false, top: false))
         }

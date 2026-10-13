@@ -222,7 +222,7 @@ struct Fixture {
     var gpu = 12, gpuTemp: Double? = 54
     var usedGiB = 23.0, totalGiB = 32.0, pressure = 1, fill = 18, swapGiB = 0.0
     var smc = true
-    var system = 14.0, dcIn = 0.0, battery: Double? = 14
+    var system = 14.0, dcIn = 0.0, battery: Double? = -14 // battery: W, negative while draining
     var hasBattery = true, connected = false, charging = false, percent = 64
     var adapter: Int?
     var free: Int64 = 412_000_000_000, total: Int64 = 926_000_000_000
@@ -235,7 +235,7 @@ struct Fixture {
                                        system: 20, dcIn: 21, battery: 1.1, connected: true, percent: 85, adapter: 65,
                                        cpuSpark: Spark(base: 22, amp: 9, seed: 3), gpuSpark: Spark(base: 35, amp: 8, seed: 5))
     static let memWarningGpuMissing = Fixture(cpu: 64, cpuTemp: 78, gpu: 31, gpuTemp: nil, usedGiB: 28.2, pressure: 2, fill: 62,
-                                              swapGiB: 3.4, system: 12, battery: 12,
+                                              swapGiB: 3.4, system: 12, battery: -12,
                                               cpuSpark: Spark(base: 64, amp: 20, seed: 2), gpuSpark: Spark(base: 31, amp: 11, seed: 7))
     static let memCritical = Fixture(usedGiB: 30.72, pressure: 4, fill: 91)
     static let cpuWarm = Fixture(cpu: 82, cpuTemp: 88, cpuSpark: Spark(base: 82, amp: 12, seed: 2))
@@ -243,8 +243,10 @@ struct Fixture {
     static let lowDisk = Fixture(free: 61_000_000_000)
     static let diskCritical = Fixture(free: 30_000_000_000)
     static let terabyte = Fixture(free: 1_200_000_000_000, total: 1_812_000_000_000)
-    static let lowDrawBattery = Fixture(system: 4.2, battery: 4.2)
+    static let lowDrawBattery = Fixture(system: 4.2, battery: -4.2)
     static let lowDrawConnected = Fixture(system: 4.4, dcIn: 4.6, battery: 0.2, connected: true, percent: 85, adapter: 65)
+    /// Connected, but the load (100 W) exceeds the 60 W charger: the battery supplies the other 40 W.
+    static let drainingConnected = Fixture(system: 100, dcIn: 60, battery: -40, connected: true, percent: 85, adapter: 60)
     static let gpuGaps = Fixture(gpu: 24, gpuTemp: 52, gpuSpark: Spark(base: 24, amp: 10, seed: 6, gaps: [44, 45, 46, 47, 80, 81]))
     static let shortHistory = Fixture(cpu: 31, cpuTemp: 58, gpu: 9, gpuTemp: 49, cpuSpark: Spark(base: 31, amp: 12, seed: 4, have: 40),
                                       gpuSpark: Spark(base: 9, amp: 5, seed: 8, have: 40))
@@ -277,8 +279,8 @@ struct Fixture {
         for (i, key) in Self.m5GPU.enumerated() { s.setFloat(key, gpuTemp.map { i == 0 ? $0 : $0 - 1 - Double(i % 3) } ?? 0) }
         s.setFloat("PSTR", system)
         s.setFloat("PDTR", dcIn)
-        if let battery { // 10 V, so the current in mA is the watts × 100; negative on battery
-            s.setInt16("B0AC", Int((battery * 100).rounded()) * (connected ? 1 : -1), signed: true)
+        if let battery { // 10 V, so the current in mA is the watts × 100; negative while draining
+            s.setInt16("B0AC", Int((battery * 100).rounded()), signed: true)
             s.setInt16("B0AV", 10000)
         }
         s.sources = hasBattery ? [[
