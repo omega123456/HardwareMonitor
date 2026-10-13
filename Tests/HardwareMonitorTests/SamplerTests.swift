@@ -32,16 +32,60 @@ extension Desktop {
             #expect(app.visible)
         }
 
-        /// Each tick reads every resolved temperature key and the four power keys (R-6, R-7); key info only once (R-9).
+        /// Each tick reads every resolved temperature key and the three power keys the bar shows (R-6, R-7); key info
+        /// only once (R-9). `PDTR` only while the panel is open.
         @Test func tickReadsEveryKeyOnce() {
             let app = h.launch()
             let launchInfos = h.system.infoFetches.count
             h.system.valueFetches = []
             h.advance(Sampler.interval)
-            #expect(Set(h.system.valueFetches) == Set(Fixture.m5CPU + Fixture.m5GPU + ["PSTR", "PDTR", "B0AC", "B0AV"]))
-            #expect(h.system.valueFetches.count == 18 + 7 + 4)
+            #expect(Set(h.system.valueFetches) == Set(Fixture.m5CPU + Fixture.m5GPU + ["PSTR", "B0AC", "B0AV"]))
+            #expect(h.system.valueFetches.count == 18 + 7 + 3)
             #expect(h.system.infoFetches.count == launchInfos)
             #expect(app.sampler.snapshot.cpuTemp == 61)
+        }
+
+        /// Only the needed metrics are read: a hidden item's sources are skipped and its values forgotten, events for it
+        /// read nothing, showing it again reads it at once, and the open panel reads everything (plus `PDTR`).
+        @Test func onlyNeededMetricsAreRead() {
+            let sampler = Sampler()
+            sampler.start()
+            h.advance(Sampler.interval)
+            sampler.show([.gpu, .memory, .power, .disk]) // CPU hidden
+            #expect(sampler.snapshot.cpu == nil && sampler.snapshot.cpuTemp == nil && sampler.snapshot.cpuHistory.samples.isEmpty)
+            let cpuReads = h.system.cpuReads
+            h.system.valueFetches = []
+            h.advance(Sampler.interval)
+            #expect(h.system.cpuReads == cpuReads && h.system.valueFetches.count == 7 + 3)
+
+            sampler.show([.disk]) // no per-tick metric: the tick isn't armed
+            #expect(h.armed == [58])
+            let sources = h.system.sourceReads
+            h.powerEvent()
+            h.pressureEvent()
+            h.advance(5)
+            #expect(h.system.sourceReads == sources && sampler.snapshot.memory == nil && h.system.cpuReads == cpuReads)
+
+            sampler.show([.cpu, .disk]) // read at once; no baseline yet, so "—" until the next tick (R-3a)
+            #expect(h.system.cpuReads == cpuReads + 1 && sampler.snapshot.cpu == nil && h.armed == [1, 53])
+            h.advance(Sampler.interval)
+            #expect(sampler.snapshot.cpu == 38)
+
+            h.system.valueFetches = []
+            sampler.panelOpened(rows: 0)
+            #expect(h.system.valueFetches.contains("PDTR") && sampler.snapshot.dcIn != nil)
+            #expect(sampler.snapshot.memory != nil && sampler.snapshot.gpu != nil && sampler.snapshot.system != nil)
+            sampler.panelClosed() // forgets what only the panel needed
+            #expect(sampler.snapshot.memory == nil && sampler.snapshot.gpu == nil && sampler.snapshot.dcIn == nil)
+            #expect(sampler.snapshot.cpu == 38 && sampler.snapshot.disk != nil)
+        }
+
+        /// The stored hidden items apply from launch: with only Disk shown, only the 60 s disk read is armed.
+        @Test func diskOnlyLaunch() {
+            h.defaults.set(["cpu", "gpu", "memory", "power"], forKey: StatusItem.hiddenKey)
+            let app = h.launch()
+            #expect(h.armed == [60] && h.system.cpuReads == 0 && h.system.sourceReads == 0 && h.system.diskReads == 1)
+            #expect(app.statusItem.shown == [.disk])
         }
 
         @Test func pausedLaunch() {
@@ -69,7 +113,8 @@ extension Desktop {
         @Test func eventsRedraw() throws {
             let app = h.launch()
             h.advance(Sampler.interval)
-            let button = try #require(app.statusItem.item.button)
+            let button = try #require(app.statusItem.items[.memory]?.button)
+            let power = try #require(app.statusItem.items[.power]?.button)
             let image = button.image
             let reads = h.system.cpuReads
             h.system.ints["kern.memorystatus_vm_pressure_level"] = 4
@@ -77,14 +122,14 @@ extension Desktop {
             h.pressureEvent()
             #expect(app.sampler.snapshot.memory?.level == .critical && app.sampler.snapshot.memory?.fill == 91)
             #expect(button.image !== image)
-            #expect(app.statusItem.glance?.columns[2].bottom == .bar(fill: 91, level: .critical))
+            #expect(app.statusItem.glances[.memory]?.columns[0].bottom == .bar(fill: 91, level: .critical))
 
-            let pressured = button.image
+            let pressured = power.image
             Fixture.charging.install(h.system)
             h.powerEvent()
             #expect(app.sampler.snapshot.source.state == .charging)
-            #expect(app.statusItem.glance?.columns[3].badge == true)
-            #expect(button.image !== pressured)
+            #expect(app.statusItem.glances[.power]?.columns[0].badge == true)
+            #expect(power.image !== pressured)
             #expect(h.system.cpuReads == reads) // no tick ran
         }
 
@@ -115,7 +160,7 @@ extension Desktop {
             #expect(app.visible && !app.sampler.paused && !Updater.paused)
             #expect((h.system.cpuReads, h.system.diskReads, h.system.sourceReads) == (reads.0 + 1, reads.1 + 1, reads.2 + 1))
             #expect(app.sampler.snapshot.source.state == .charging) // the power change while hidden
-            #expect(app.statusItem.glance?.columns[3].badge == true)
+            #expect(app.statusItem.glances[.power]?.columns[0].badge == true)
             // Histories restart; the return tick has no CPU baseline: a gap, and the last % stays shown (R-3a).
             #expect(app.sampler.snapshot.cpuHistory.samples == [nil])
             #expect(app.sampler.snapshot.gpuHistory.samples == [12])
@@ -195,9 +240,9 @@ extension Desktop {
             let app = h.launch()
             h.system.volume = (61_000_000_000, 926_000_000_000, "Macintosh HD")
             h.advance(59)
-            #expect(app.statusItem.glance?.columns[4].top.text == "412")
+            #expect(app.statusItem.glances[.disk]?.columns[0].top.text == "412")
             h.advance(1)
-            #expect(app.statusItem.glance?.columns[4].top == .init(text: "61", unit: "G", level: .warning, strong: true))
+            #expect(app.statusItem.glances[.disk]?.columns[0].top == .init(text: "61", unit: "G", level: .warning, strong: true))
         }
 
         // MARK: Panel-only work (R-11)

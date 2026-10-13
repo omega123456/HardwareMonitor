@@ -2,7 +2,8 @@ import Foundation
 
 /// The single scheduler and the source of truth for what is shown (DD-2): the 1 s tick, the 60 s disk read, the
 /// event re-reads and, only while the panel is open, the 1 s panel round, all through `Env` one-shots (DD-4); R-3a
-/// debounce and histories; pause and resume (R-21). Readers never schedule anything.
+/// debounce and histories; pause and resume (R-21). Readers never schedule anything. Only the `needed` metrics are
+/// read: the shown items' and, while the panel is open, all of them.
 final class Sampler {
     static let interval: TimeInterval = 1, diskInterval: TimeInterval = 60, panelInterval: TimeInterval = 1
     static let topRounds = 6
@@ -13,6 +14,9 @@ final class Sampler {
     private(set) var paused = false
     /// What only the open panel shows; nil while it is closed (R-11).
     private(set) var extras: PanelExtras?
+    /// The metrics with a status item shown (set through `show`).
+    private(set) var shown = Set(Column.Glyph.allCases)
+    var needed: Set<Column.Glyph> { Metrics.needed(shown: shown, panelOpen: extras != nil) }
 
     private let smc = SMC()
     private let thermal: Thermal
@@ -48,9 +52,17 @@ final class Sampler {
     /// launch while not visible does nothing here; `resume` runs the same steps on return.
     func start() {
         guard !paused else { return }
-        snapshot.source = Power.source()
-        readDisk()
-        tick()
+        readAtOnce(needed)
+    }
+
+    /// The power state, the disk read and a tick, each only if `metrics` needs it; the reads re-arm their cadence.
+    private func readAtOnce(_ metrics: Set<Column.Glyph>) {
+        if metrics.contains(.power) { snapshot.source = Power.source() }
+        if metrics.contains(.disk) { readDisk() }
+        if Metrics.perTick(metrics) {
+            tickTimer?.cancel()
+            tick()
+        }
     }
 
     /// Leaving visible (R-21): every timer is cancelled and later events are ignored.
@@ -72,9 +84,52 @@ final class Sampler {
         snapshot.cpuHistory.clear()
         snapshot.gpuHistory.clear()
         cpu.reset()
-        snapshot.source = Power.source()
-        readDisk()
-        tick()
+        readAtOnce(needed)
+    }
+
+    /// The shown items changed: newly needed metrics are read at once, ones no longer needed are forgotten.
+    func show(_ shown: Set<Column.Glyph>) {
+        let old = needed
+        self.shown = shown
+        reconfigure(from: old)
+    }
+
+    /// Applies a change of `needed`. A metric no longer needed is forgotten (its timers, values and history), so it
+    /// starts at "—" when it is needed again (R-3a) and never shows a stale reading.
+    private func reconfigure(from old: Set<Column.Glyph>) {
+        let new = needed
+        for g in old.subtracting(new) { forget(g) }
+        if !Metrics.perTick(new) {
+            tickTimer?.cancel()
+            tickTimer = nil
+        }
+        guard !paused else { return }
+        readAtOnce(new.subtracting(old))
+    }
+
+    private func forget(_ g: Column.Glyph) {
+        switch g {
+        case .cpu:
+            cpuUsage = .init(); cpuTemp = .init()
+            snapshot.cpu = nil; snapshot.cpuTemp = nil
+            snapshot.cpuHistory.clear()
+            cpu.reset()
+        case .gpu:
+            gpuUsage = .init(); gpuTemp = .init()
+            snapshot.gpu = nil; snapshot.gpuTemp = nil
+            snapshot.gpuHistory.clear()
+        case .memory:
+            memory = .init()
+            snapshot.memory = nil
+        case .power:
+            system = .init(); battery = .init()
+            snapshot.system = nil; snapshot.battery = nil
+        case .disk:
+            diskTimer?.cancel()
+            diskTimer = nil
+            disk = .init()
+            snapshot.disk = nil
+        }
     }
 
     /// Closes the SMC connection at quit (R-9).
@@ -84,28 +139,37 @@ final class Sampler {
     /// one-shot 1 s later.
     private func tick() {
         let started = DispatchTime.now().uptimeNanoseconds
+        let needed = self.needed
         var s = snapshot
-        switch cpu.read() {
-        case .percent(let p):
-            s.cpu = cpuUsage.update(p)
-            s.cpuHistory.append(p)
-        case .noBaseline: // keeps the last value; a gap in the history
-            s.cpuHistory.append(nil)
-        case .failed:
-            s.cpu = cpuUsage.update(nil)
-            s.cpuHistory.append(nil)
+        if needed.contains(.cpu) {
+            switch cpu.read() {
+            case .percent(let p):
+                s.cpu = cpuUsage.update(p)
+                s.cpuHistory.append(p)
+            case .noBaseline: // keeps the last value; a gap in the history
+                s.cpuHistory.append(nil)
+            case .failed:
+                s.cpu = cpuUsage.update(nil)
+                s.cpuHistory.append(nil)
+            }
         }
-        let g = gpu.read()
-        s.gpu = gpuUsage.update(g)
-        s.gpuHistory.append(g)
-        let t = thermal.read()
-        s.cpuTemp = cpuTemp.update(t.cpu)
-        s.gpuTemp = gpuTemp.update(t.gpu)
-        s.memory = memory.update(Memory.read())
-        let p = power.read()
-        s.system = system.update(p.system)
-        s.dcIn = dcIn.update(p.dcIn)
-        s.battery = battery.update(p.battery)
+        if needed.contains(.gpu) {
+            let g = gpu.read()
+            s.gpu = gpuUsage.update(g)
+            s.gpuHistory.append(g)
+        }
+        if needed.contains(.cpu) || needed.contains(.gpu) {
+            let t = thermal.read(cpu: needed.contains(.cpu), gpu: needed.contains(.gpu))
+            if needed.contains(.cpu) { s.cpuTemp = cpuTemp.update(t.cpu) }
+            if needed.contains(.gpu) { s.gpuTemp = gpuTemp.update(t.gpu) }
+        }
+        if needed.contains(.memory) { s.memory = memory.update(Memory.read()) }
+        if needed.contains(.power) {
+            let p = power.read(dcIn: extras != nil) // PDTR: only the open panel shows it
+            s.system = system.update(p.system)
+            s.battery = battery.update(p.battery)
+            if extras != nil { s.dcIn = dcIn.update(p.dcIn) }
+        }
         s.time = Env.now()
         snapshot = s
         ticks += 1
@@ -113,7 +177,7 @@ final class Sampler {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
             EventLog.write("tick: #\(ticks) took \(String(format: "%.2f", ms)) ms")
         }
-        tickTimer = Env.after(Self.interval) { [weak self] in self?.tick() }
+        tickTimer = Metrics.perTick(needed) ? Env.after(Self.interval) { [weak self] in self?.tick() } : nil
         onChange()
     }
 
@@ -124,7 +188,10 @@ final class Sampler {
     func panelOpened(rows: Int) {
         guard !paused, extras == nil else { return }
         if frequency == nil { frequency = Frequency(generation: thermal.chip.generation) }
+        let old = needed
         extras = PanelExtras(rows: rows)
+        reconfigure(from: old) // the tiles of hidden items are read from now on
+        snapshot.dcIn = dcIn.update(power.dcIn()) // the "Adapter in" row, read only while open
         rounds = 0
         topBusy = false
         round()
@@ -139,7 +206,11 @@ final class Sampler {
         ps.cancel()
         top.cancel()
         frequency?.reset()
+        let old = needed
         extras = nil
+        dcIn = .init()
+        snapshot.dcIn = nil
+        reconfigure(from: old) // forgets the metrics only the panel needed
     }
 
     /// One round: `ps`, and `top` every `topRounds` (single flight each; skipped when the processes tile is left out),
@@ -178,13 +249,13 @@ final class Sampler {
     }
 
     private func pressureChanged() {
-        guard !paused else { return }
+        guard !paused, needed.contains(.memory) else { return }
         snapshot.memory = memory.update(Memory.read())
         onChange()
     }
 
     private func powerChanged() {
-        guard !paused else { return }
+        guard !paused, needed.contains(.power) else { return }
         snapshot.source = Power.source()
         onChange()
     }

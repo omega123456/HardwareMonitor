@@ -75,8 +75,16 @@ extension Desktop {
             #expect(h.system.valueFetches.isEmpty) // resolving needs key info only
             h.system.setFloat("Tp08", 130) // implausible: ignored
             h.system.setFloat("Tp0C", 84.6)
-            let t = thermal.read()
+            let t = thermal.read(cpu: true, gpu: true)
             #expect(t.cpu == Double(Float(84.6)) && t.gpu == 54)
+            // A group not asked for reads no key.
+            h.system.valueFetches = []
+            #expect(thermal.read(cpu: false, gpu: true).cpu == nil)
+            #expect(h.system.valueFetches == Fixture.m5GPU)
+            h.system.valueFetches = []
+            let none = thermal.read(cpu: false, gpu: false)
+            #expect(none.cpu == nil && none.gpu == nil)
+            #expect(h.system.valueFetches.isEmpty)
         }
 
         /// Unknown chip: the prefix filter runs on enumerated names before any info or value fetch; a key is kept
@@ -95,7 +103,7 @@ extension Desktop {
             #expect(thermal.cpuKeys == ["Tp01"] && thermal.gpuKeys == ["Tg03"])
             #expect(h.system.infoFetches == ["#KEY", "Te02", "Tg03", "Tp01"])
             #expect(h.system.valueFetches == ["#KEY", "Te02", "Tg03", "Tp01"])
-            #expect(thermal.read().cpu == 60 && thermal.read().gpu == 50)
+            #expect(thermal.read(cpu: true, gpu: true).cpu == 60 && thermal.read(cpu: true, gpu: true).gpu == 50)
         }
 
         @Test func unknownChipWithoutTheKeyCount() {
@@ -103,7 +111,7 @@ extension Desktop {
             h.system.smc = [:] // #KEY reads 0
             let thermal = Thermal(smc: SMC())
             #expect(thermal.chip.name == "unknown" && thermal.cpuKeys.isEmpty && thermal.gpuKeys.isEmpty)
-            #expect(thermal.read().cpu == nil)
+            #expect(thermal.read(cpu: true, gpu: true).cpu == nil)
         }
 
         // MARK: Power (R-7)
@@ -112,10 +120,13 @@ extension Desktop {
             let power = Power(smc: SMC())
             h.system.setInt16("B0AC", -1000, signed: true) // unsigned: the sign comes from the charging state
             h.system.setInt16("B0AV", 12000)
-            let p = power.read()
+            let p = power.read(dcIn: true)
             #expect(p.system == 14 && p.dcIn == 0 && p.battery == 12)
+            h.system.valueFetches = []
+            #expect(power.read(dcIn: false).dcIn == nil) // PDTR only for the open panel
+            #expect(!h.system.valueFetches.contains("PDTR"))
             h.system.smc["B0AV"] = nil
-            #expect(Power(smc: SMC()).read().battery == nil)
+            #expect(Power(smc: SMC()).read(dcIn: true).battery == nil)
         }
 
         @Test func powerSourceDictionaries() {

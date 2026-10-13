@@ -17,7 +17,7 @@ enum SelfTest {
         let groups: [(String, () -> Void)] = [
             ("visibility", visibility), ("chip", chip), ("temperature keys", temperatureKeys), ("prefix filter", prefixFilter),
             ("usage", usage), ("temperature", temperature), ("power state", powerState), ("formats", formats),
-            ("levels", levels), ("missing values", missingValues), ("history", history), ("columns", columns),
+            ("levels", levels), ("missing values", missingValues), ("history", history), ("shown items", shownItems), ("columns", columns),
             ("accessibility", accessibility), ("updater", updateVersions),
             ("process parsing", processParsing), ("process naming", processNaming), ("ranking", ranking),
             ("clocks", clocks), ("power track", powerTrack), ("short screen", shortScreen), ("panel strings", panelStrings),
@@ -201,6 +201,22 @@ enum SelfTest {
         return s
     }
 
+    private static func shownItems() {
+        let all = Set(Column.Glyph.allCases)
+        check("all needed while open", Metrics.needed(shown: [.disk], panelOpen: true) == all)
+        check("shown needed while closed", Metrics.needed(shown: [.cpu, .disk], panelOpen: false) == [.cpu, .disk])
+        check("disk alone: no tick", !Metrics.perTick([.disk]))
+        check("any other: tick", Metrics.perTick([.power, .disk]) && Metrics.perTick([.memory]))
+        check("hide one of two", Metrics.toggled([.cpu, .gpu], .cpu) == [.gpu])
+        check("show a hidden one", Metrics.toggled([.gpu], .disk) == [.gpu, .disk])
+        check("the last one stays", Metrics.toggled([.gpu], .gpu) == [.gpu])
+        check("can hide unless last", Metrics.canHide([.cpu, .gpu], .cpu) && !Metrics.canHide([.gpu], .gpu) && Metrics.canHide([.gpu], .cpu))
+        check("stored hidden names", Metrics.shown(hidden: ["cpu", "power"]) == [.gpu, .memory, .disk])
+        check("unknown names ignored", Metrics.shown(hidden: ["fan"]) == all)
+        check("nothing shown means all", Metrics.shown(hidden: Column.Glyph.allCases.map(\.rawValue)) == all)
+        check("menu names", Column.Glyph.allCases.map(Metrics.name) == ["CPU", "GPU", "Memory", "Power", "Disk"])
+    }
+
     private static func columns() {
         var s = normal
         var c = Metrics.columns(s)
@@ -241,6 +257,8 @@ enum SelfTest {
         var s = normal
         check("normal summary", Metrics.summary(s) == "CPU 38 percent, 61 degrees. GPU 12 percent, 54 degrees. "
               + "Memory 72 percent, normal pressure. Power 14 watts, on battery. Disk 412 gigabytes free of 926")
+        check("one item's label", Metrics.phrase(.memory, s) == "Memory 72 percent, normal pressure"
+              && Metrics.phrase(.cpu, s) == "CPU 38 percent, 61 degrees")
         s.cpu = 82
         s.cpuTemp = 88
         check("CPU hot", Metrics.summary(s).hasPrefix("CPU 82 percent, 88 degrees, hot. "))

@@ -101,7 +101,8 @@ struct Snapshot: Equatable {
 
 /// One column of the status image (R-14): a glyph and two stacked values.
 struct Column: Equatable {
-    enum Glyph: Equatable { case cpu, gpu, memory, power, disk }
+    /// Also the metric's identity: one status item each, in this default order (its raw value names it in defaults).
+    enum Glyph: String, CaseIterable { case cpu, gpu, memory, power, disk }
 
     /// A value slot's text: digits, a smaller unit, the level, and fg (strong) or dim. The critical `!` is drawn from
     /// the level.
@@ -256,11 +257,47 @@ enum Metrics {
         return share < 0.05 ? .critical : share < 0.15 ? .warning : .normal
     }
 
+    // MARK: Shown items and what they need read
+
+    /// The metrics whose sources are read: the shown items' and, while the panel is open, every tile's.
+    static func needed(shown: Set<Column.Glyph>, panelOpen: Bool) -> Set<Column.Glyph> {
+        panelOpen ? Set(Column.Glyph.allCases) : shown
+    }
+
+    /// The 1 s tick is armed only while a per-tick metric is needed (the disk has its own 60 s read).
+    static func perTick(_ needed: Set<Column.Glyph>) -> Bool { !needed.subtracting([.disk]).isEmpty }
+
+    /// The metric's name in the right-click menu's "Show in Menu Bar" rows.
+    static func name(_ g: Column.Glyph) -> String {
+        switch g {
+        case .cpu: "CPU"
+        case .gpu: "GPU"
+        case .memory: "Memory"
+        case .power: "Power"
+        case .disk: "Disk"
+        }
+    }
+
+    /// At least one item is always shown: the last one can't be hidden.
+    static func canHide(_ shown: Set<Column.Glyph>, _ g: Column.Glyph) -> Bool { shown.count > 1 || !shown.contains(g) }
+
+    /// The menu toggle: shows `g`, or hides it unless it is the last one shown.
+    static func toggled(_ shown: Set<Column.Glyph>, _ g: Column.Glyph) -> Set<Column.Glyph> {
+        if !shown.contains(g) { return shown.union([g]) }
+        return canHide(shown, g) ? shown.subtracting([g]) : shown
+    }
+
+    /// The shown set from the stored hidden names; unknown names are ignored, and nothing shown means all.
+    static func shown(hidden: [String]) -> Set<Column.Glyph> {
+        let shown = Set(Column.Glyph.allCases).subtracting(hidden.compactMap(Column.Glyph.init))
+        return shown.isEmpty ? Set(Column.Glyph.allCases) : shown
+    }
+
     // MARK: Status image (R-14)
 
     static let missing = Column.Value(text: "—")
 
-    /// The five columns, in fixed order: CPU, GPU, Memory, Power, Disk.
+    /// The five columns, in default order: CPU, GPU, Memory, Power, Disk (each item draws its own).
     static func columns(_ s: Snapshot) -> [Column] {
         func usage(_ glyph: Column.Glyph, _ usage: Int?, _ temp: Double?) -> Column {
             Column(glyph: glyph, top: usage.map { .init(text: "\($0)", unit: "%", strong: true) } ?? missing,
@@ -288,11 +325,19 @@ enum Metrics {
 
     // MARK: Accessibility (R-16, NFR-4)
 
-    /// The status item's label: one phrase per column, in column order, joined with ". ".
-    static func summary(_ s: Snapshot) -> String {
-        [usagePhrase("CPU", s.cpu, s.cpuTemp), usagePhrase("GPU", s.gpu, s.gpuTemp), memoryPhrase(s.memory),
-         powerPhrase(s), diskPhrase(s.disk)].joined(separator: ". ")
+    /// One status item's label.
+    static func phrase(_ g: Column.Glyph, _ s: Snapshot) -> String {
+        switch g {
+        case .cpu: usagePhrase("CPU", s.cpu, s.cpuTemp)
+        case .gpu: usagePhrase("GPU", s.gpu, s.gpuTemp)
+        case .memory: memoryPhrase(s.memory)
+        case .power: powerPhrase(s)
+        case .disk: diskPhrase(s.disk)
+        }
     }
+
+    /// Every item's label in default order, joined with ". ".
+    static func summary(_ s: Snapshot) -> String { Column.Glyph.allCases.map { phrase($0, s) }.joined(separator: ". ") }
 
     private static func usagePhrase(_ name: String, _ usage: Int?, _ temp: Double?) -> String {
         let head = usage.map { "\(name) \($0) percent" } ?? "\(name) usage unavailable"

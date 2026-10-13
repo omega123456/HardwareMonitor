@@ -10,11 +10,14 @@ final class Power {
 
     /// `PSTR` (system draw) and `PDTR` (DC-in; key names from exelban/Stats), and battery power, unsigned: `B0AC`
     /// (battery current, mA, negative on battery) × `B0AV` (battery voltage, mV). Not `PPBR`: on an M5 Pro it reads
-    /// ~1 W while the battery charges at ~25 W.
-    func read() -> (system: Double?, dcIn: Double?, battery: Double?) {
+    /// ~1 W while the battery charges at ~25 W. `PDTR` only when asked for (only the open panel shows it).
+    func read(dcIn: Bool) -> (system: Double?, dcIn: Double?, battery: Double?) {
         let battery = smc.value("B0AC").flatMap { mA in smc.value("B0AV").map { mV in abs(mA * mV) / 1e6 } }
-        return (smc.value("PSTR"), smc.value("PDTR"), battery)
+        return (smc.value("PSTR"), dcIn ? self.dcIn() : nil, battery)
     }
+
+    /// `PDTR` alone: read when the panel opens, so its "Adapter in" row doesn't wait for the tick.
+    func dcIn() -> Double? { smc.value("PDTR") }
 
     static func source() -> PowerSource { decode(System.current.powerSources(), adapter: System.current.adapterDetails()) }
 

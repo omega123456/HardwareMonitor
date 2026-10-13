@@ -17,15 +17,14 @@ extension Desktop {
             case memCritical, memCriticalLight, cpuWarm, cpuWarmLight, hotCPU, hotCPULight
             case lowDisk, lowDiskLight, diskCritical, diskCriticalLight, terabyte, terabyteLight
             case smcUnavailable, smcUnavailableLight, noBattery, noBatteryLight
-            case normalOpen, normalOpenLight, normalNoDev, normalNoDevLight
+            case normalNoDev, normalNoDevLight
             case normalContrast, memCriticalContrast, hotCPUContrast, normalLightContrast
 
             var light: Bool { rawValue.contains("Light") }
             var contrast: Bool { rawValue.hasSuffix("Contrast") }
-            var open: Bool { rawValue.contains("Open") }
             var dev: Bool { !rawValue.contains("NoDev") }
             var fixture: Fixture {
-                switch rawValue.replacingOccurrences(of: "(Open|NoDev)?(Light)?(Contrast)?$", with: "", options: .regularExpression) {
+                switch rawValue.replacingOccurrences(of: "(NoDev)?(Light)?(Contrast)?$", with: "", options: .regularExpression) {
                 case "charging": .charging
                 case "heldConnected": .heldConnected
                 case "lowDrawBattery": .lowDrawBattery
@@ -48,10 +47,10 @@ extension Desktop {
             light ? NSColor(srgbRed: 0.93, green: 0.92, blue: 0.94, alpha: 1) : NSColor(srgbRed: 0.16, green: 0.17, blue: 0.24, alpha: 1)
         }
 
-        /// Draws the image at 2x over the backdrop, 4 pt margin, through AppKit's drawing-handler path.
-        static func render(_ glance: Glance, light: Bool) -> NSImage {
-            let image = glance.image()
-            let size = NSSize(width: image.size.width + 8, height: Glance.height + 8)
+        /// Draws the images at 2x over the backdrop, 4 pt margin and apart, through AppKit's drawing-handler path.
+        static func render(_ glances: [Glance], light: Bool) -> NSImage {
+            let images = glances.map { $0.image() }
+            let size = NSSize(width: images.reduce(4) { $0 + $1.size.width + 4 }, height: Glance.height + 8)
             let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2),
                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -60,7 +59,11 @@ extension Desktop {
             NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
             backdrop(light: light).setFill()
             NSRect(origin: .zero, size: size).fill()
-            image.draw(in: NSRect(x: 4, y: 4, width: image.size.width, height: Glance.height))
+            var x: CGFloat = 4
+            for image in images {
+                image.draw(in: NSRect(x: x, y: 4, width: image.size.width, height: Glance.height))
+                x += image.size.width + 4
+            }
             NSGraphicsContext.restoreGraphicsState()
             let out = NSImage(size: size)
             out.addRepresentation(rep)
@@ -73,9 +76,28 @@ extension Desktop {
             h.ws.contrast = c.contrast
             Style.appearanceOverride = NSAppearance(named: c.light ? .aqua : .darkAqua)
             defer { Style.appearanceOverride = nil }
-            let glance = Glance(columns: Metrics.columns(h.snapshot()), highlighted: c.open, dev: c.dev,
+            let glance = Glance(columns: Metrics.columns(h.snapshot()), dev: c.dev,
                                 style: Style.current(for: NSAppearance(named: .aqua)!))
-            assertSnapshot(of: Self.render(glance, light: c.light), as: imageStrategy, named: c.rawValue, testName: "StatusImage")
+            assertSnapshot(of: Self.render([glance], light: c.light), as: imageStrategy, named: c.rawValue, testName: "StatusImage")
+        }
+
+        /// The five items as `StatusItem` builds them, in default order, with DEV on the first shown item. The open
+        /// panel's highlight is the system's, drawn by the button, so it isn't in the images.
+        @Test(arguments: [false, true])
+        func separateItems(_ light: Bool) {
+            let h = Harness()
+            Style.appearanceOverride = NSAppearance(named: light ? .aqua : .darkAqua)
+            defer { Style.appearanceOverride = nil }
+            let sampler = Sampler()
+            let item = StatusItem(sampler: sampler)
+            sampler.onChange = { [weak item] in item?.update() }
+            sampler.start()
+            h.advance(Sampler.interval)
+            item.handle(mouseUp(.leftMouseUp), on: .gpu)
+            let glances = Column.Glyph.allCases.compactMap { item.glances[$0] }
+            assertSnapshot(of: Self.render(glances, light: light), as: imageStrategy,
+                           named: light ? "separateItemsLight" : "separateItems", testName: "StatusImage")
+            item.closePanel("test", animated: false)
         }
 
         /// The hover panel (R-17, layout B + Panel states). Each case runs its fixture through the stub `System`, the
@@ -180,7 +202,7 @@ extension Desktop {
 
         /// NSMenu can't be drawn offscreen (it renders only while tracking on a real display), so the menu is
         /// compared as text: ✓ for on, (disabled), separators as ---.
-        enum MenuCase: String, CaseIterable { case defaults, loginOnUpdatesOff }
+        enum MenuCase: String, CaseIterable { case defaults, loginOnUpdatesOff, lastShown }
 
         @Test(arguments: MenuCase.allCases)
         func menu(_ c: MenuCase) {
@@ -189,6 +211,7 @@ extension Desktop {
                 h.loginStatus = .enabled
                 Updater.toggle()
             }
+            if c == .lastShown { h.defaults.set(["cpu", "gpu", "memory", "power"], forKey: StatusItem.hiddenKey) }
             let item = StatusItem(sampler: Sampler())
             assertSnapshot(of: Self.outline(item.makeMenu()), as: .lines, named: c.rawValue, testName: "Menu")
         }

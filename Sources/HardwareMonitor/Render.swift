@@ -25,8 +25,6 @@ struct Style: Equatable {
     /// bar, as the artifact's States demo shows (deviation 11).
     var dim: NSColor { contrast ? fg : dark ? rgba(245, 245, 247, 0.80) : rgba(29, 29, 31, 0.78) }
     var track: NSColor { dark ? rgba(255, 255, 255, contrast ? 0.32 : 0.2) : rgba(0, 0, 0, contrast ? 0.26 : 0.14) }
-    /// The open-panel item highlight: grey (50 %) at 22 % (deviation 9, DD-14).
-    var highlight: NSColor { rgba(127, 127, 127, 0.22) }
 
     /// Text in a level's colour. Light warning text is #9A5A00 (about 5.5 : 1 on white, deviation 2).
     func text(_ level: Level) -> NSColor {
@@ -62,14 +60,13 @@ struct Style: Equatable {
 /// content would. Drawn as the artifact's `item()` (UI/UX Wireframes → Status item image).
 struct Glance: Equatable {
     var columns: [Column]
-    var highlighted = false   // the open-panel item highlight (DD-14, Phase 2)
     var dev = false           // the Dev builds' "DEV" label (DD-14)
     var style = Style()       // the appearance the image was built for (DD-5)
 
     // MARK: Metrics
 
     static let height: CGFloat = 22
-    private static let padding: CGFloat = 4, gap: CGFloat = 8, glyphSize: CGFloat = 13, glyphGap: CGFloat = 3
+    private static let gap: CGFloat = 8, glyphSize: CGFloat = 13, glyphGap: CGFloat = 3
     private static let devFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
     /// "DEV" baseline: GlanceBar's label baseline, cap height centred on y 11.
     private static let devBaseline: CGFloat = 15.6
@@ -105,7 +102,7 @@ struct Glance: Equatable {
         }
     }
     private static let slots: [Column.Glyph: CGFloat] = Dictionary(uniqueKeysWithValues:
-        [Column.Glyph.cpu, .gpu, .memory, .power, .disk].map { ($0, slot($0)) })
+        Column.Glyph.allCases.map { ($0, slot($0)) })
 
     /// The status image: non-template, 22 pt tall, drawn at draw time in the drawing appearance (DD-5), so each
     /// display's menu bar replica gets its own colours.
@@ -122,11 +119,7 @@ struct Glance: Equatable {
 
     /// Draws the columns left to right in `style`.
     private func draw(_ style: Style) {
-        if highlighted {
-            style.highlight.setFill()
-            NSBezierPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: Self.height), xRadius: 5, yRadius: 5).fill()
-        }
-        var x = Self.padding
+        var x: CGFloat = 0
         if dev { x += Self.text("DEV", x, Self.devBaseline, Self.devFont, style.dim) + Self.gap }
         for col in columns {
             Self.glyph(col.glyph, in: CGRect(x: x, y: (Self.height - Self.glyphSize) / 2, width: Self.glyphSize, height: Self.glyphSize),
@@ -154,9 +147,10 @@ struct Glance: Equatable {
         }
     }
 
-    /// 4 pt side padding, the optional "DEV" label, then each column (glyph, 3 pt, slot) 8 pt apart.
+    /// No side padding (the menu bar spaces the items), the optional "DEV" label, then each column (glyph, 3 pt,
+    /// slot) 8 pt apart.
     var width: CGFloat {
-        var x = Self.padding * 2
+        var x: CGFloat = 0
         if dev { x += Self.text("DEV", 0, 0, Self.devFont, nil) + Self.gap }
         for col in columns { x += Self.glyphSize + Self.glyphGap + (Self.slots[col.glyph] ?? 0) }
         x += Self.gap * CGFloat(max(0, columns.count - 1))

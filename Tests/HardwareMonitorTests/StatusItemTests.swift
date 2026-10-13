@@ -24,11 +24,11 @@ extension Desktop {
 
         @Test func imageAndLabelFollowTheData() throws {
             let (item, sampler) = item()
-            let button = try #require(item.item.button)
+            let button = try #require(item.items[.cpu]?.button)
             #expect(button.image?.isTemplate == false && button.image?.size.height == 22)
-            #expect(button.accessibilityLabel() == "CPU 38 percent, 61 degrees. GPU 12 percent, 54 degrees. "
-                    + "Memory 72 percent, normal pressure. Power 14 watts, on battery. Disk 412 gigabytes free of 926")
-            #expect(h.log.contains("image: updated ("))
+            #expect(button.accessibilityLabel() == "CPU 38 percent, 61 degrees")
+            #expect(item.items[.memory]?.button?.accessibilityLabel() == "Memory 72 percent, normal pressure")
+            #expect(h.log.contains("image: cpu updated ("))
 
             // R-16: same drawn content, so the image is not reassigned.
             let image = button.image
@@ -49,24 +49,28 @@ extension Desktop {
         @Test func missingValuesKeepTheWidth() throws {
             let sampler = Sampler()
             let item = StatusItem(sampler: sampler)
-            let empty = try #require(item.glance)
+            let empty = try #require(item.glances[.cpu])
             #expect(empty.columns.allSatisfy { $0.top == Metrics.missing })
             sampler.onChange = { [weak item] in item?.update() }
             sampler.start()
-            #expect(item.glance != empty)
-            #expect(item.glance?.width == empty.width)
+            #expect(item.glances[.cpu] != empty)
+            #expect(item.glances[.cpu]?.width == empty.width)
         }
 
         /// R-14: every state draws at the same width (slots reserved at the widest text, critical mark included).
         @Test func everyStateHasTheSameWidth() {
             let fixtures: [Fixture] = [.normal, .charging, .heldConnected, .lowDrawBattery, .memWarningGpuMissing, .memCritical,
                                        .cpuWarm, .hotCPU, .lowDisk, .diskCritical, .terabyte, .smcUnavailable, .noBattery]
-            let widths = Set(fixtures.map { f in
+            let columns = fixtures.map { f in
                 f.install(h.system)
-                return Glance(columns: Metrics.columns(h.snapshot())).width
-            })
-            #expect(widths == [294]) // measured; the plan's target is ≤ 280 (reported to the owner)
-            #expect(Glance(columns: Metrics.columns(Snapshot()), dev: true).width == 329)
+                return Metrics.columns(h.snapshot())
+            }
+            #expect(Set(columns.map { Glance(columns: $0).width }) == [286]) // measured; the plan's target is ≤ 280 (reported to the owner)
+            #expect(Glance(columns: Metrics.columns(Snapshot()), dev: true).width == 321)
+            // Each item on its own: one width per metric in every state.
+            for g in Column.Glyph.allCases {
+                #expect(Set(columns.map { Glance(columns: $0.filter { $0.glyph == g }).width }).count == 1, "\(g)")
+            }
         }
 
         /// DD-10: a left click toggles the panel (also when hover opened it); right-click or ⌃-click closes it and
@@ -83,11 +87,11 @@ extension Desktop {
             #expect(h.log.contains("panel: closed (menu)"))
             item.handle(mouseUp(.leftMouseUp, flags: .control))
             #expect(h.popUps.count == 2 && !item.panelOpen)
-            #expect(item.item.menu == nil) // never a permanent menu (DD-10)
+            #expect(item.items.values.allSatisfy { $0.menu == nil }) // never a permanent menu (DD-10)
             #expect(StatusItem.isMenuClick(mouseUp(.rightMouseDown)))
             #expect(!StatusItem.isMenuClick(mouseUp(.leftMouseUp, flags: .command)))
-            item.perform(NSSelectorFromString("clicked"))
-            #expect(item.panelOpen)
+            item.perform(NSSelectorFromString("clicked:"), with: item.items[.gpu]?.button) // the sending item anchors it
+            #expect(item.panelOpen && item.anchored == .gpu)
             item.closePanel("test", animated: false)
             #expect(h.log.contains("menu: opened"))
         }
@@ -99,7 +103,7 @@ extension Desktop {
             let (item, _) = item()
             item.handle(mouseUp(.rightMouseUp))
             #expect(try #require(h.popUps.last).appearance?.name == .aqua)
-            #expect(item.glance?.style.dark == true) // the image keeps following the menu bar
+            #expect(item.glances[.cpu]?.style.dark == true) // the image keeps following the menu bar
             h.systemAppearance = NSAppearance(named: .darkAqua)!
             item.handle(mouseUp(.leftMouseUp, flags: .control))
             #expect(try #require(h.popUps.last).appearance?.name == .darkAqua)
@@ -107,23 +111,24 @@ extension Desktop {
 
         @Test func appearanceAndContrastChangeTheImage() throws {
             let (item, _) = item()
-            let button = try #require(item.item.button)
+            let button = try #require(item.items[.cpu]?.button)
             let image = button.image
             h.ws.contrast = true
             item.update()
             #expect(button.image !== image)
-            #expect(item.glance?.style.contrast == true)
+            #expect(item.glances[.cpu]?.style.contrast == true)
             Style.appearanceOverride = NSAppearance(named: .darkAqua)
             defer { Style.appearanceOverride = nil }
             item.update()
-            #expect(item.glance?.style.dark == true)
+            #expect(item.glances[.cpu]?.style.dark == true)
         }
 
         @Test func rightClickMenu() {
             let (item, _) = item()
             let menu = item.makeMenu()
             #expect(menu.items.map { $0.isSeparatorItem ? "-" : $0.title }.dropFirst(2)
-                    == ["Launch at Login", "Automatic Updates", "Check for Updates…", "-", "Quit HardwareMonitor"])
+                    == ["Show in Menu Bar", "CPU", "GPU", "Memory", "Power", "Disk", "-",
+                        "Launch at Login", "Automatic Updates", "Check for Updates…", "-", "Quit HardwareMonitor"])
             #expect(menu.items.first?.title.hasPrefix("HardwareMonitor Dev ") == true && menu.items.first?.isEnabled == false)
 
             // Launch at Login: registering may need approval in System Settings; on again unregisters.
@@ -171,28 +176,89 @@ extension Desktop {
         /// monitor and the panel-only work.
         @Test func hoverOpens() async {
             let (item, sampler) = item()
-            item.itemTracker.entered()
-            item.itemTracker.exited() // a sweep across the menu bar
+            item.itemTrackers[.cpu]!.entered()
+            item.itemTrackers[.cpu]!.exited() // a sweep across the menu bar
             h.advance(1)
             #expect(!item.panelOpen && item.panel == nil)
-            item.itemTracker.entered()
-            item.itemTracker.mouseMoved(with: NSEvent()) // moves don't re-arm
+            item.itemTrackers[.cpu]!.entered()
+            item.itemTrackers[.cpu]!.mouseMoved(with: NSEvent()) // moves don't re-arm
             #expect(h.armed.filter { $0 == 0.3 }.count == 1)
             h.advance(0.29)
             #expect(!item.panelOpen)
             h.advance(0.01)
-            #expect(item.panelOpen && shown(item) && item.glance?.highlighted == true && h.monitorInstalls == 1)
+            #expect(item.panelOpen && shown(item) && item.items[.cpu]?.button?.isHighlighted == true && h.monitorInstalls == 1)
             #expect(sampler.extras?.rows == 8 && h.system.samples == 1)
             #expect(h.log.contains("panel: opened (hover, 8 rows)"))
             #expect(item.panelView.panel?.content.tiles.count == 5 && item.panelView.panel?.content.lists?.count == 2)
             #expect(item.panelView.frame.size == CGSize(width: 368, height: 679)) // layout B with 8 rows
-            item.itemTracker.entered() // already open: nothing
+            item.itemTrackers[.cpu]!.entered() // already open: nothing
             #expect(h.armed.filter { $0 == 0.3 }.isEmpty)
             h.advance(1)
             await h.until { sampler.extras?.memory != .measuring }
             #expect(item.panelView.panel?.content.lists?.last?.rows.first == .init(name: "com.docker.sailo", value: "9.0 GB"))
             item.closePanel("test", animated: false)
-            #expect(item.glance?.highlighted == false && h.clickMonitor == nil)
+            #expect(item.items[.cpu]?.button?.isHighlighted == false && h.clickMonitor == nil)
+        }
+
+        /// One shared panel: hovering another item while open moves it there at once with the highlight (its work
+        /// carries on); a click on another item moves it, a click on the anchored one closes it.
+        @Test func panelFollowsTheItems() throws {
+            let (item, sampler) = item()
+            item.itemTrackers[.gpu]!.entered()
+            h.advance(0.3)
+            #expect(item.panelOpen && item.anchored == .gpu && item.items[.gpu]?.button?.isHighlighted == true)
+            #expect(item.items[.cpu]?.button?.isHighlighted == false)
+            let extras = sampler.extras
+            h.itemFrame.origin.x = 1000 // the disk item's window
+            item.itemTrackers[.gpu]!.exited()
+            item.itemTrackers[.disk]!.entered()
+            #expect(item.anchored == .disk && item.items[.disk]?.button?.isHighlighted == true && item.items[.gpu]?.button?.isHighlighted == false)
+            #expect(try #require(item.panel?.frame).maxX == 1300 && h.log.contains("panel: moved (disk)"))
+            h.advance(1)
+            #expect(item.panelOpen && sampler.extras?.rows == extras?.rows && h.monitorInstalls == 1) // the close was cancelled
+            item.handle(mouseUp(.leftMouseUp), on: .memory)
+            #expect(item.panelOpen && item.anchored == .memory)
+            item.handle(mouseUp(.leftMouseUp), on: .memory)
+            #expect(!item.panelOpen && sampler.extras == nil)
+            item.handle(mouseUp(.leftMouseUp), on: .power)
+            #expect(item.panelOpen && item.anchored == .power)
+        }
+
+        /// The "Show in Menu Bar" rows hide and show items (stored in defaults); the last shown one can't be hidden,
+        /// from the menu or by ⌘-drag. Hiding the anchored item closes the panel; DEV is on the first shown item.
+        @Test func showInMenuBar() {
+            let (item, sampler) = item()
+            func row(_ name: String) -> NSMenuItem? { item.makeMenu().items.first { $0.title == name } }
+            func choose(_ name: String, in menu: NSMenu) {
+                guard let entry = menu.items.first(where: { $0.title == name }) else { Issue.record("no \(name)"); return }
+                NSApp.sendAction(entry.action!, to: entry.target, from: entry)
+            }
+            #expect(item.glances[.cpu]?.dev == StatusItem.dev && item.glances[.gpu]?.dev == false)
+            item.handle(mouseUp(.leftMouseUp), on: .cpu)
+            choose("CPU", in: item.makeMenu())
+            #expect(!item.panelOpen && item.shown == [.gpu, .memory, .power, .disk])
+            #expect(h.defaults.stringArray(forKey: StatusItem.hiddenKey) == ["cpu"] && sampler.snapshot.cpu == nil)
+            #expect(item.glances[.gpu]?.dev == StatusItem.dev && h.log.contains("items: hidden [cpu]"))
+            #expect(row("CPU")?.state == .off && row("GPU")?.state == .on)
+            for name in ["GPU", "Memory", "Power"] { choose(name, in: item.makeMenu()) }
+            #expect(item.shown == [.disk] && row("Disk")?.isEnabled == false && row("CPU")?.isEnabled == true)
+            #expect(item.items[.disk]?.behavior.contains(.removalAllowed) == false)
+            #expect(item.items[.cpu]?.behavior.contains(.removalAllowed) == true)
+            item.setShown([]) // never empty
+            #expect(item.shown == [.disk])
+            choose("Memory", in: item.makeMenu())
+            #expect(item.shown == [.memory, .disk] && item.items[.disk]?.behavior.contains(.removalAllowed) == true)
+            #expect(sampler.snapshot.memory != nil) // read at once
+
+            // A ⌘-drag out (the item turned invisible while shown) hides it like its row; the last one stays.
+            item.visibilityChanged(.memory) // invisible in tests
+            #expect(item.shown == [.disk])
+            item.visibilityChanged(.disk)
+            #expect(item.shown == [.disk])
+
+            // The next launch restores the hidden items.
+            let next = StatusItem(sampler: Sampler())
+            #expect(next.shown == [.disk])
         }
 
         /// Leaving the item and the panel closes it 400 ms later; reaching the panel cancels that; a fade-out
@@ -200,16 +266,16 @@ extension Desktop {
         @Test func pointerLeaves() {
             let (item, sampler) = item()
             item.handle(mouseUp(.leftMouseUp))
-            item.itemTracker.exited()
+            item.itemTrackers[.cpu]!.exited()
             h.advance(0.3)
             item.panelTracker.entered() // reached the panel in time
             h.advance(1)
             #expect(item.panelOpen)
             item.panelTracker.exited()
-            item.itemTracker.entered() // back on the item
+            item.itemTrackers[.cpu]!.entered() // back on the item
             h.advance(1)
             #expect(item.panelOpen)
-            item.itemTracker.exited()
+            item.itemTrackers[.cpu]!.exited()
             item.panelTracker.exited() // one pending close only
             h.advance(0.39)
             #expect(item.panelOpen)
@@ -255,7 +321,7 @@ extension Desktop {
                 ("screens changed", { h.center.post(name: NSApplication.didChangeScreenParametersNotification, object: nil) }),
                 ("menu", { item.handle(mouseUp(.rightMouseUp)) }),
                 ("click", { item.handle(mouseUp(.leftMouseUp)) }),
-                ("pointer left", { item.itemTracker.exited(); h.advance(0.4) }),
+                ("pointer left", { item.itemTrackers[.cpu]!.exited(); h.advance(0.4) }),
                 ("not visible", { h.ws.center.post(name: NSWorkspace.screensDidSleepNotification, object: nil) }),
             ]
             for (i, (why, close)) in paths.enumerated() {
@@ -274,7 +340,7 @@ extension Desktop {
                 #expect(h.launches("ps").count == i + 1, "nothing launched while closed: \(why)")
             }
             // Hidden: hovering and clicking can't open it; back to visible they can.
-            item.itemTracker.entered()
+            item.itemTrackers[.cpu]!.entered()
             h.advance(1)
             item.handle(mouseUp(.leftMouseUp))
             #expect(!item.panelOpen)
@@ -344,14 +410,14 @@ extension Desktop {
             #expect(app.visible)
             #expect(h.log.contains("launch: chip M5 Pro, SMC available, IOReport available, CPU keys 18, GPU keys 7"))
             h.advance(Sampler.interval)
-            #expect(app.statusItem.glance?.columns.first?.top.text == "38")
+            #expect(app.statusItem.glances[.cpu]?.columns.first?.top.text == "38")
             app.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
             #expect(h.system.smcClosed)
         }
 
         @Test func redrawTriggers() throws {
             let app = h.launch()
-            let button = try #require(app.statusItem.item.button)
+            let button = try #require(app.statusItem.items[.cpu]?.button)
             let image = button.image
             h.center.post(name: NSApplication.didChangeScreenParametersNotification, object: nil)
             h.center.post(name: NSColor.systemColorsDidChangeNotification, object: nil)

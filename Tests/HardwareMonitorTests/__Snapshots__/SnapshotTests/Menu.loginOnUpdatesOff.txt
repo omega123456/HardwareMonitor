@@ -1,5 +1,12 @@
   HardwareMonitor Dev <version> (debug) (disabled)
 ---
+  Show in Menu Bar
+✓ CPU
+✓ GPU
+✓ Memory
+✓ Power
+✓ Disk
+---
 ✓ Launch at Login
   Automatic Updates
   Check for Updates…

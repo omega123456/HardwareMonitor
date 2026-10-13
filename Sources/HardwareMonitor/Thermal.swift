@@ -25,8 +25,9 @@ final class Thermal {
         }
     }
 
-    /// One tick: every resolved key, the hottest plausible reading per group (nil if none).
-    func read() -> (cpu: Double?, gpu: Double?) {
-        (Metrics.hottest(cpuKeys.compactMap(smc.value)), Metrics.hottest(gpuKeys.compactMap(smc.value)))
+    /// One tick: every resolved key of each asked-for group, the hottest plausible reading per group (nil if none or
+    /// not asked for).
+    func read(cpu: Bool, gpu: Bool) -> (cpu: Double?, gpu: Double?) {
+        (cpu ? Metrics.hottest(cpuKeys.compactMap(smc.value)) : nil, gpu ? Metrics.hottest(gpuKeys.compactMap(smc.value)) : nil)
     }
 }

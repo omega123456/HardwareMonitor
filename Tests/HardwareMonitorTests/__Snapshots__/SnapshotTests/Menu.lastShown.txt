@@ -1,0 +1,14 @@
+  HardwareMonitor Dev <version> (debug) (disabled)
+---
+  Show in Menu Bar
+  CPU
+  GPU
+  Memory
+  Power
+✓ Disk (disabled)
+---
+  Launch at Login
+✓ Automatic Updates
+  Check for Updates…
+---
+  Quit HardwareMonitor
