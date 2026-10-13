@@ -14,7 +14,9 @@ extension Desktop {
             let flt = Float(61.25).bitPattern
             #expect(SMC.decode([0, 8, 16, 24].map { UInt8(truncatingIfNeeded: flt >> $0) }, type: "flt ") == 61.25) // little-endian
             #expect(SMC.decode([0xAB], type: "ui8 ") == 171)
-            #expect(SMC.decode([0x01, 0x02], type: "ui16") == 258) // big-endian
+            #expect(SMC.decode([0x02, 0x01], type: "ui16") == 258) // little-endian
+            #expect(SMC.decode([0x18, 0xFC], type: "si16") == -1000)
+            #expect(SMC.decode([1], type: "si16") == nil) // short data
             #expect(SMC.decode([0x00, 0x00, 0x07, 0xD0], type: "ui32") == 2000)
             #expect(SMC.decode([0x3D, 0x80], type: "sp78") == 61.5)
             #expect(SMC.decode([0xFF, 0x80], type: "sp78") == -0.5)
@@ -108,9 +110,12 @@ extension Desktop {
 
         @Test func powerKeys() {
             let power = Power(smc: SMC())
-            h.system.setFloat("PPBR", -12) // unsigned: the sign comes from the charging state
+            h.system.setInt16("B0AC", -1000, signed: true) // unsigned: the sign comes from the charging state
+            h.system.setInt16("B0AV", 12000)
             let p = power.read()
             #expect(p.system == 14 && p.dcIn == 0 && p.battery == 12)
+            h.system.smc["B0AV"] = nil
+            #expect(Power(smc: SMC()).read().battery == nil)
         }
 
         @Test func powerSourceDictionaries() {

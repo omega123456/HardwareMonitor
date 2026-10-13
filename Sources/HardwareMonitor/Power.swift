@@ -8,9 +8,12 @@ final class Power {
 
     init(smc: SMC) { self.smc = smc }
 
-    /// `PSTR` (system draw), `PDTR` (DC-in) and `PPBR` (battery, unsigned; key names from exelban/Stats).
+    /// `PSTR` (system draw) and `PDTR` (DC-in; key names from exelban/Stats), and battery power, unsigned: `B0AC`
+    /// (battery current, mA, negative on battery) × `B0AV` (battery voltage, mV). Not `PPBR`: on an M5 Pro it reads
+    /// ~1 W while the battery charges at ~25 W.
     func read() -> (system: Double?, dcIn: Double?, battery: Double?) {
-        (smc.value("PSTR"), smc.value("PDTR"), smc.value("PPBR").map(abs))
+        let battery = smc.value("B0AC").flatMap { mA in smc.value("B0AV").map { mV in abs(mA * mV) / 1e6 } }
+        return (smc.value("PSTR"), smc.value("PDTR"), battery)
     }
 
     static func source() -> PowerSource { decode(System.current.powerSources(), adapter: System.current.adapterDetails()) }

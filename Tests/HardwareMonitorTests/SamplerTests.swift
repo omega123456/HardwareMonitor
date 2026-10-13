@@ -32,14 +32,14 @@ extension Desktop {
             #expect(app.visible)
         }
 
-        /// Each tick reads every resolved temperature key and the three power keys (R-6, R-7); key info only once (R-9).
+        /// Each tick reads every resolved temperature key and the four power keys (R-6, R-7); key info only once (R-9).
         @Test func tickReadsEveryKeyOnce() {
             let app = h.launch()
             let launchInfos = h.system.infoFetches.count
             h.system.valueFetches = []
             h.advance(Sampler.interval)
-            #expect(Set(h.system.valueFetches) == Set(Fixture.m5CPU + Fixture.m5GPU + ["PSTR", "PDTR", "PPBR"]))
-            #expect(h.system.valueFetches.count == 18 + 7 + 3)
+            #expect(Set(h.system.valueFetches) == Set(Fixture.m5CPU + Fixture.m5GPU + ["PSTR", "PDTR", "B0AC", "B0AV"]))
+            #expect(h.system.valueFetches.count == 18 + 7 + 4)
             #expect(h.system.infoFetches.count == launchInfos)
             #expect(app.sampler.snapshot.cpuTemp == 61)
         }

@@ -99,6 +99,12 @@ final class StubSystem: System {
         smc[key] = ("flt ", [0, 8, 16, 24].map { UInt8(truncatingIfNeeded: bits >> $0) })
     }
 
+    /// A `ui16` or `si16` key (little-endian).
+    func setInt16(_ key: String, _ value: Int, signed: Bool = false) {
+        let bits = UInt16(truncatingIfNeeded: value)
+        smc[key] = (signed ? "si16" : "ui16", [UInt8(truncatingIfNeeded: bits), UInt8(bits >> 8)])
+    }
+
     private var keyNames: [String] { smc.keys.sorted() }
 
     override func sysctlInt(_ name: String) -> Int? { ints[name] }
@@ -243,7 +249,7 @@ struct Fixture {
     static let shortHistory = Fixture(cpu: 31, cpuTemp: 58, gpu: 9, gpuTemp: 49, cpuSpark: Spark(base: 31, amp: 12, seed: 4, have: 40),
                                       gpuSpark: Spark(base: 9, amp: 5, seed: 8, have: 40))
     static let smcUnavailable = Fixture(smc: false)
-    /// A desktop: no battery, no PPBR (the menu bar's bottom line is a dim "—"); the PDTR value only feeds the panel's
+    /// A desktop: no battery, no B0AC/B0AV (the menu bar's bottom line is a dim "—"); the PDTR value only feeds the panel's
     /// "Adapter in" row and is this fixture's own choice.
     static let noBattery = Fixture(dcIn: 15, battery: nil, hasBattery: false)
 
@@ -271,7 +277,10 @@ struct Fixture {
         for (i, key) in Self.m5GPU.enumerated() { s.setFloat(key, gpuTemp.map { i == 0 ? $0 : $0 - 1 - Double(i % 3) } ?? 0) }
         s.setFloat("PSTR", system)
         s.setFloat("PDTR", dcIn)
-        if let battery { s.setFloat("PPBR", battery) }
+        if let battery { // 10 V, so the current in mA is the watts × 100; negative on battery
+            s.setInt16("B0AC", Int((battery * 100).rounded()) * (connected ? 1 : -1), signed: true)
+            s.setInt16("B0AV", 10000)
+        }
         s.sources = hasBattery ? [[
             "Type": "InternalBattery", "Power Source State": connected ? "AC Power" : "Battery Power",
             "Is Charging": charging, "Current Capacity": percent, "Max Capacity": 100,

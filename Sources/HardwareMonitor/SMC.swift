@@ -51,16 +51,19 @@ final class SMC {
         String(decoding: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: code >> $0) }, as: UTF8.self)
     }
 
-    /// `flt ` (little-endian float), `ui8 `, `ui16`, `ui32` (big-endian) and `sp78` (signed 8.8 fixed point,
-    /// big-endian). Other types and short data: nil.
+    /// `flt ` (little-endian float), `ui8 `, `ui16`/`si16` (little-endian, as Apple Silicon stores them: `B0DC` reads
+    /// the design capacity), `ui32` (big-endian, as `#KEY`) and `sp78` (signed 8.8 fixed point, big-endian). Other
+    /// types and short data: nil.
     static func decode(_ b: [UInt8], type: String) -> Double? {
         func be(_ n: Int) -> UInt32? { b.count >= n ? b.prefix(n).reduce(0) { $0 << 8 | UInt32($1) } : nil }
+        let le16 = b.count >= 2 ? UInt16(b[1]) << 8 | UInt16(b[0]) : nil
         switch type {
         case "flt ":
             guard b.count >= 4 else { return nil }
             return Double(Float(bitPattern: b.prefix(4).reversed().reduce(0) { $0 << 8 | UInt32($1) }))
         case "ui8 ": return be(1).map(Double.init)
-        case "ui16": return be(2).map(Double.init)
+        case "ui16": return le16.map(Double.init)
+        case "si16": return le16.map { Double(Int16(bitPattern: $0)) }
         case "ui32": return be(4).map(Double.init)
         case "sp78": return be(2).map { Double(Int16(bitPattern: UInt16($0))) / 256 }
         default: return nil
