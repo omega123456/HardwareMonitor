@@ -5,15 +5,19 @@ import IOKit.ps
 /// on every power event (R-2) and on every return to visible (R-21).
 final class Power {
     private let smc: SMC
+    private var held: Double?, primed = false
 
     init(smc: SMC) { self.smc = smc }
+
+    func reset() { primed = false }
 
     /// `PSTR` (system draw) and `PDTR` (DC-in; key names from exelban/Stats), and battery power, signed: `B0AC`
     /// (battery current, mA, negative while the battery drains) × `B0AV` (battery voltage, mV). Not `PPBR`: on an M5 Pro it reads
     /// ~1 W while the battery charges at ~25 W. `PDTR` only when asked for (only the open panel shows it).
     func read(dcIn: Bool) -> (system: Double?, dcIn: Double?, battery: Double?) {
         let battery = smc.value("B0AC").flatMap { mA in smc.value("B0AV").map { mV in mA * mV / 1e6 } }
-        return (smc.value("PSTR"), dcIn ? self.dcIn() : nil, battery)
+        defer { (held, primed) = (battery, true) }
+        return (smc.value("PSTR"), dcIn ? self.dcIn() : nil, primed ? held : battery)
     }
 
     /// `PDTR` alone: read when the panel opens, so its "Adapter in" row doesn't wait for the tick.

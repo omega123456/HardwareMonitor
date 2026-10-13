@@ -84,6 +84,7 @@ final class Sampler {
         snapshot.cpuHistory.clear()
         snapshot.gpuHistory.clear()
         cpu.reset()
+        power.reset()
         readAtOnce(needed)
     }
 
@@ -123,6 +124,7 @@ final class Sampler {
             snapshot.memory = nil
         case .power:
             system = .init(); battery = .init()
+            power.reset()
             snapshot.system = nil; snapshot.battery = nil
         case .disk:
             diskTimer?.cancel()

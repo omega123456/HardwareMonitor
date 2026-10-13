@@ -125,6 +125,12 @@ extension Desktop {
             h.system.valueFetches = []
             #expect(power.read(dcIn: false).dcIn == nil) // PDTR only for the open panel
             #expect(!h.system.valueFetches.contains("PDTR"))
+            h.system.setInt16("B0AC", -2000, signed: true)
+            #expect(power.read(dcIn: false).battery == -12)
+            #expect(power.read(dcIn: false).battery == -24)
+            h.system.setInt16("B0AC", -500, signed: true)
+            power.reset()
+            #expect(power.read(dcIn: false).battery == -6)
             h.system.smc["B0AV"] = nil
             #expect(Power(smc: SMC()).read(dcIn: true).battery == nil)
         }
