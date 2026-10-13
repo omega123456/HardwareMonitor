@@ -32,6 +32,25 @@ extension Desktop {
             #expect(app.visible)
         }
 
+        /// R-1: the tick stays on a 1 s grid from launch however late each one fires, so lateness never adds up and
+        /// every read keeps its place in the SMC's 1 s window (the held battery reading matches `PSTR`); a stall skips
+        /// whole slots.
+        @Test func tickStaysOnGrid() {
+            let app = h.launch()
+            let launched = h.now
+            func nextTick() -> TimeInterval {
+                (h.scheduler.pending[0].at.timeIntervalSince(launched) * 1e6).rounded() / 1e6
+            }
+            for n in 1...10 {
+                h.advance(1.05, late: 0.05) // tick n runs at n + 0.05
+                #expect(nextTick() == Double(n + 1))
+            }
+            #expect(h.system.cpuReads == 11)
+            h.advance(3, late: 2.4) // due at 11, runs at 13.4
+            #expect(nextTick() == 14 && h.system.cpuReads == 12)
+            #expect(app.visible)
+        }
+
         /// Each tick reads every resolved temperature key and the three power keys the bar shows (R-6, R-7); key info
         /// only once (R-9). `PDTR` only while the panel is open.
         @Test func tickReadsEveryKeyOnce() {

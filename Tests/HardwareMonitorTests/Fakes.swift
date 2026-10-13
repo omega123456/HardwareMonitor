@@ -462,10 +462,11 @@ final class Harness {
     var log: String { (try? String(contentsOf: EventLog.url, encoding: .utf8)) ?? "" }
 
     /// Moves the fake clock by `seconds`, firing every armed one-shot that comes due, in order.
-    func advance(_ seconds: TimeInterval) {
+    /// `late` fires each one `late` seconds after it is due (capped at the end), like a timer's tolerance.
+    func advance(_ seconds: TimeInterval, late: TimeInterval = 0) {
         let end = now.addingTimeInterval(seconds)
         while let next = scheduler.pending.first, next.at <= end {
-            now = max(now, next.at)
+            now = max(now, min(next.at.addingTimeInterval(late), end))
             next.cancelled = true
             next.fire()
         }

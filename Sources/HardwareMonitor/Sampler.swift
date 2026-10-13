@@ -138,8 +138,8 @@ final class Sampler {
     func close() { smc.close() }
 
     /// One tick (R-1): every per-tick reading, one snapshot stamped with the tick time, the histories, the next
-    /// one-shot 1 s later.
-    private func tick() {
+    /// one-shot 1 s after this one was due.
+    private func tick(due: Date = Env.now()) {
         let started = DispatchTime.now().uptimeNanoseconds
         let needed = self.needed
         var s = snapshot
@@ -179,7 +179,11 @@ final class Sampler {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6
             EventLog.write("tick: #\(ticks) took \(String(format: "%.2f", ms)) ms")
         }
-        tickTimer = Metrics.perTick(needed) ? Env.after(Self.interval) { [weak self] in self?.tick() } : nil
+        // On a 1 s grid from when this tick was due, not from when it ran: lateness doesn't add up, so each read stays in
+        // the same place within the SMC's 1 s window and the held battery reading matches `PSTR` (R-1). A stall skips
+        // whole slots.
+        let next = due.addingTimeInterval((floor(Env.now().timeIntervalSince(due) / Self.interval) + 1) * Self.interval)
+        tickTimer = Metrics.perTick(needed) ? Env.at(next) { [weak self] in self?.tick(due: next) } : nil
         onChange()
     }
 
