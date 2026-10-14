@@ -78,7 +78,11 @@ extension Desktop {
             h.ws.contrast = c.contrast
             Style.appearanceOverride = NSAppearance(named: c.light ? .aqua : .darkAqua)
             defer { Style.appearanceOverride = nil }
-            let glance = Glance(columns: Metrics.columns(h.snapshot()), dev: c.dev,
+            var snapshot = h.snapshot()
+            // The usage level from the fixture's 2-minute history (a launch has too few samples for its window).
+            snapshot.cpuLevel = Metrics.usageLevel(c.fixture.cpuSpark.history(usage: snapshot.cpu), was: .normal)
+            snapshot.gpuLevel = Metrics.usageLevel(c.fixture.gpuSpark.history(usage: snapshot.gpu), was: .normal)
+            let glance = Glance(columns: Metrics.columns(snapshot), dev: c.dev,
                                 style: Style.current(for: NSAppearance(named: .aqua)!))
             assertSnapshot(of: Self.render([glance], light: c.light), as: imageStrategy, named: c.rawValue, testName: "StatusImage")
         }
@@ -196,6 +200,8 @@ extension Desktop {
             var snapshot = h.snapshot()
             snapshot.cpuHistory = c.fixture.cpuSpark.history(usage: snapshot.cpu)
             snapshot.gpuHistory = c.fixture.gpuSpark.history(usage: snapshot.gpu)
+            snapshot.cpuLevel = Metrics.usageLevel(snapshot.cpuHistory, was: .normal)
+            snapshot.gpuLevel = Metrics.usageLevel(snapshot.gpuHistory, was: .normal)
             let now = c == .stale ? h.now.addingTimeInterval(14) : h.now
             let view = PanelView()
             view.appearance = appearance

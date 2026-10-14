@@ -2,7 +2,8 @@ import Foundation
 
 // MARK: - Value types
 
-/// A displayed value's state (R-15). Normal is neutral: no green anywhere.
+/// A displayed value's state (R-15). Normal is neutral: no green on a value (the glyphs carry each metric's identity
+/// colour instead, owner, 2026-10-14).
 enum Level: Equatable { case normal, warning, critical }
 
 /// The chip from `machdep.cpu.brand_string` (R-6).
@@ -96,6 +97,9 @@ struct Snapshot: Equatable {
     var disk: DiskReading?
     var cpuHistory = History()
     var gpuHistory = History()
+    /// The sustained-usage warning (`usageLevel`), kept per tick for its hysteresis.
+    var cpuLevel = Level.normal
+    var gpuLevel = Level.normal
     var time: Date?
 }
 
@@ -254,6 +258,17 @@ enum Metrics {
         return shown >= 95 ? .critical : shown >= 85 ? .warning : .normal
     }
 
+    /// CPU and GPU usage (owner, 2026-10-14): a warning while the mean of the last 30 samples (gaps skipped) is
+    /// ≥ 85 %, which ends only below 75 % (hysteresis, so it doesn't flicker); never critical, since busy isn't harm.
+    /// It needs a full window, so a fresh or cleared history (launch, return to visible, re-shown) starts normal.
+    static let busyWindow = 30, busyOn = 85.0, busyOff = 75.0
+    static func usageLevel(_ h: History, was: Level) -> Level {
+        let window = h.samples.suffix(busyWindow).compactMap { $0 }
+        guard h.samples.count >= busyWindow, !window.isEmpty else { return .normal }
+        let mean = Double(window.reduce(0, +)) / Double(window.count)
+        return mean >= (was == .normal ? busyOn : busyOff) ? .warning : .normal
+    }
+
     /// Warning below 15 % free, critical below 5 % free, from the raw bytes.
     static func diskLevel(free: Int64, total: Int64) -> Level {
         guard total > 0 else { return .normal }
@@ -303,8 +318,8 @@ enum Metrics {
 
     /// The five columns, in default order: CPU, GPU, Memory, Power, Disk (each item draws its own).
     static func columns(_ s: Snapshot) -> [Column] {
-        func usage(_ glyph: Column.Glyph, _ usage: Int?, _ temp: Double?) -> Column {
-            Column(glyph: glyph, top: usage.map { .init(text: "\($0)", unit: "%", strong: true) } ?? missing,
+        func usage(_ glyph: Column.Glyph, _ usage: Int?, _ level: Level, _ temp: Double?) -> Column {
+            Column(glyph: glyph, top: usage.map { .init(text: "\($0)", unit: "%", level: level, strong: true) } ?? missing,
                    bottom: .value(temp.map { .init(text: "\(degrees($0))", unit: "°", level: temperatureLevel($0)) } ?? missing))
         }
         func watts(_ w: Double?) -> Column.Value {
@@ -328,7 +343,7 @@ enum Metrics {
                               return .init(text: t.value, unit: t.unit, level: diskLevel(free: d.free, total: d.total), strong: true)
                           } ?? missing,
                           bottom: .value(s.disk.map { let t = bytes($0.total); return .init(text: t.value, unit: t.unit) } ?? missing))
-        return [usage(.cpu, s.cpu, s.cpuTemp), usage(.gpu, s.gpu, s.gpuTemp), memory, power, disk]
+        return [usage(.cpu, s.cpu, s.cpuLevel, s.cpuTemp), usage(.gpu, s.gpu, s.gpuLevel, s.gpuTemp), memory, power, disk]
     }
 
     // MARK: Accessibility (R-16, NFR-4)
@@ -336,8 +351,8 @@ enum Metrics {
     /// One status item's label.
     static func phrase(_ g: Column.Glyph, _ s: Snapshot) -> String {
         switch g {
-        case .cpu: usagePhrase("CPU", s.cpu, s.cpuTemp)
-        case .gpu: usagePhrase("GPU", s.gpu, s.gpuTemp)
+        case .cpu: usagePhrase("CPU", s.cpu, s.cpuLevel, s.cpuTemp)
+        case .gpu: usagePhrase("GPU", s.gpu, s.gpuLevel, s.gpuTemp)
         case .memory: memoryPhrase(s.memory)
         case .power: powerPhrase(s)
         case .disk: diskPhrase(s.disk)
@@ -347,8 +362,8 @@ enum Metrics {
     /// Every item's label in default order, joined with ". ".
     static func summary(_ s: Snapshot) -> String { Column.Glyph.allCases.map { phrase($0, s) }.joined(separator: ". ") }
 
-    private static func usagePhrase(_ name: String, _ usage: Int?, _ temp: Double?) -> String {
-        let head = usage.map { "\(name) \($0) percent" } ?? "\(name) usage unavailable"
+    private static func usagePhrase(_ name: String, _ usage: Int?, _ level: Level, _ temp: Double?) -> String {
+        let head = usage.map { "\(name) \($0) percent" + busyWord(level) } ?? "\(name) usage unavailable"
         guard let temp else { return head + ", temperature unavailable" }
         let word = switch temperatureLevel(temp) {
         case .normal: ""
@@ -357,6 +372,8 @@ enum Metrics {
         }
         return "\(head), \(degrees(temp)) degrees\(word)"
     }
+
+    private static func busyWord(_ l: Level) -> String { l == .normal ? "" : ", busy" }
 
     private static func memoryPhrase(_ m: MemoryReading?) -> String {
         guard let m else { return "Memory unavailable" }
@@ -752,9 +769,10 @@ extension Metrics {
         }
     }
 
-    /// The CPU or GPU tile: usage, sparkline, temperature (Hot / ! Critical), the peak; CPU adds the clock rows.
-    static func usageTile(_ glyph: Column.Glyph, _ name: String, usage: Int?, temp: Double?, history: History,
-                          clocks: [ClockRow]? = nil) -> Tile {
+    /// The CPU or GPU tile: usage (amber while `busy`), sparkline, temperature, the peak; CPU adds the clock rows. The
+    /// header word is the temperature's (Hot / ! Critical), else "Busy".
+    static func usageTile(_ glyph: Column.Glyph, _ name: String, usage: Int?, busy: Level = .normal, temp: Double?,
+                          history: History, clocks: [ClockRow]? = nil) -> Tile {
         let level = temp.map(temperatureLevel) ?? .normal
         let peak = peak(history)
         var rows = [
@@ -763,7 +781,8 @@ extension Metrics {
             } ?? unavailable),
             Tile.Row(label: peak.label, value: peak.value.map { Run(text: "\($0)%") } ?? dash),
         ]
-        var spoken = [name, usage.map { "\($0) percent" } ?? "usage unavailable",
+        let busy = usage == nil ? .normal : busy
+        var spoken = [name, usage.map { "\($0) percent" + busyWord(busy) } ?? "usage unavailable",
                       temp.map { "temperature \(degrees($0)) degrees" + levelWord(level) } ?? "temperature unavailable",
                       "peak over " + (history.samples.count >= History.capacity ? "2 minutes" : "\(history.samples.count) seconds")
                           + (peak.value.map { " \($0) percent" } ?? " unavailable")]
@@ -774,11 +793,11 @@ extension Metrics {
                           : c.mhz.map { gigahertz($0).replacingOccurrences(of: "GHz", with: "gigahertz") } ?? "unavailable"))
         }
         let word: Run? = switch level {
-        case .normal: nil
+        case .normal: busy == .normal ? nil : Run(text: "Busy", level: .warning)
         case .warning: Run(text: "Hot", level: .warning)
         case .critical: Run(text: "! Critical", level: .critical)
         }
-        return Tile(glyph: glyph, title: name, word: word, value: Run(text: usage.map(String.init) ?? "—"),
+        return Tile(glyph: glyph, title: name, word: word, value: Run(text: usage.map(String.init) ?? "—", level: busy),
                     unit: usage == nil ? "Unavailable" : "%", graphic: usage == nil ? .none : .spark(history.samples),
                     rows: rows, label: spoken.joined(separator: ", "))
     }
@@ -902,8 +921,8 @@ extension Metrics {
 
     /// The whole panel from the snapshot and the extras (nil extras: before the first round).
     static func panel(_ s: Snapshot, _ e: PanelExtras, now: Date) -> PanelContent {
-        PanelContent(tiles: [usageTile(.cpu, "CPU", usage: s.cpu, temp: s.cpuTemp, history: s.cpuHistory, clocks: e.clocks),
-                             usageTile(.gpu, "GPU", usage: s.gpu, temp: s.gpuTemp, history: s.gpuHistory),
+        PanelContent(tiles: [usageTile(.cpu, "CPU", usage: s.cpu, busy: s.cpuLevel, temp: s.cpuTemp, history: s.cpuHistory, clocks: e.clocks),
+                             usageTile(.gpu, "GPU", usage: s.gpu, busy: s.gpuLevel, temp: s.gpuTemp, history: s.gpuHistory),
                              memoryTile(s.memory), diskTile(s.disk), powerTile(s)],
                      lists: e.rows > 0 ? [processList(e.cpu, memory: false, slots: e.rows), processList(e.memory, memory: true, slots: e.rows)] : nil,
                      footer: staleFooter(s.time, now: now))

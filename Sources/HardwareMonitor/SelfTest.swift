@@ -156,6 +156,22 @@ enum SelfTest {
         check("disk 61 of 926 → warning", Metrics.diskLevel(free: 61_000_000_000, total: 926_000_000_000) == .warning)
         check("disk 30 of 926 → critical", Metrics.diskLevel(free: 30_000_000_000, total: 926_000_000_000) == .critical)
         check("disk without total", Metrics.diskLevel(free: 0, total: 0) == .normal)
+        // Usage (owner, 2026-10-14): the 30-sample mean, on at ≥ 85, off below 75, never critical.
+        func busy(_ samples: [Int?], was: Level = .normal) -> Level {
+            var h = History()
+            samples.forEach { h.append($0) }
+            return Metrics.usageLevel(h, was: was)
+        }
+        check("usage: short history → normal", busy(Array(repeating: 100, count: 29)) == .normal)
+        check("usage: mean 85 → warning", busy(Array(repeating: 85, count: 30)) == .warning)
+        check("usage: mean 84 → normal", busy(Array(repeating: 84, count: 30)) == .normal)
+        check("usage: 3 s spike → normal", busy(Array(repeating: 20, count: 27) + [100, 100, 100]) == .normal)
+        check("usage: only the last 30 count", busy(Array(repeating: 100, count: 60) + Array(repeating: 10, count: 30)) == .normal)
+        check("usage: stays on at 75", busy(Array(repeating: 75, count: 30), was: .warning) == .warning)
+        check("usage: off below 75", busy(Array(repeating: 74, count: 30), was: .warning) == .normal)
+        check("usage: never critical", busy(Array(repeating: 100, count: 30), was: .warning) == .warning)
+        check("usage: gaps skipped", busy(Array(repeating: nil, count: 20) + Array(repeating: 90, count: 10)) == .warning)
+        check("usage: all gaps → normal", busy(Array(repeating: nil, count: 30), was: .warning) == .normal)
     }
 
     // MARK: Missing values and history (R-3a)
@@ -257,6 +273,10 @@ enum SelfTest {
         c = Metrics.columns(s)
         check("levels on the slots", c[0].bottom == .value(.init(text: "97", unit: "°", level: .critical))
               && c[2].top.level == .critical && c[2].bottom == .bar(fill: 18, level: .critical) && c[4].top.level == .critical)
+        s.cpuLevel = .warning
+        s.gpuLevel = .warning
+        c = Metrics.columns(s)
+        check("busy: amber usage", c[0].top == .init(text: "38", unit: "%", level: .warning, strong: true) && c[1].top.level == .warning)
         c = Metrics.columns(Snapshot())
         check("missing: dim — everywhere", c.allSatisfy { $0.top == Metrics.missing } && c[2].bottom == .bar(fill: nil, level: .normal))
     }
@@ -272,6 +292,9 @@ enum SelfTest {
         s.cpu = 82
         s.cpuTemp = 88
         check("CPU hot", Metrics.summary(s).hasPrefix("CPU 82 percent, 88 degrees, hot. "))
+        s.gpuLevel = .warning
+        check("GPU busy", Metrics.phrase(.gpu, s) == "GPU 12 percent, busy, 54 degrees")
+        s.gpuLevel = .normal
         s.cpu = 100
         s.cpuTemp = 97
         check("CPU critical", Metrics.summary(s).hasPrefix("CPU 100 percent, 97 degrees, critical. "))
@@ -547,8 +570,14 @@ enum SelfTest {
         var s = normal
         s.cpuTemp = 88
         var t = Metrics.usageTile(.cpu, "CPU", usage: 82, temp: 88, history: h)
-        check("hot: header and amber temperature, usage neutral", t.word == Run(text: "Hot", level: .warning)
+        check("hot: header and amber temperature, usage normal", t.word == Run(text: "Hot", level: .warning)
               && t.rows[0].value == Run(text: "88 °C", level: .warning) && t.value == Run(text: "82"))
+        t = Metrics.usageTile(.cpu, "CPU", usage: 96, busy: .warning, temp: 70, history: h)
+        check("busy: Busy and amber usage", t.word == Run(text: "Busy", level: .warning) && t.value == Run(text: "96", level: .warning)
+              && t.label.hasPrefix("CPU, 96 percent, busy, "))
+        t = Metrics.usageTile(.cpu, "CPU", usage: 96, busy: .warning, temp: 97, history: h)
+        check("busy and critical: the temperature word wins", t.word == Run(text: "! Critical", level: .critical)
+              && t.value.level == .warning)
         t = Metrics.usageTile(.cpu, "CPU", usage: 100, temp: 97, history: h)
         check("critical: ! Critical and ! 97 °C", t.word == Run(text: "! Critical", level: .critical)
               && t.rows[0].value == Run(text: "! 97 °C", level: .critical))

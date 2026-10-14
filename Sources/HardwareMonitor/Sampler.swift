@@ -83,6 +83,8 @@ final class Sampler {
         onChange()
         snapshot.cpuHistory.clear()
         snapshot.gpuHistory.clear()
+        snapshot.cpuLevel = .normal
+        snapshot.gpuLevel = .normal
         cpu.reset()
         power.reset()
         readAtOnce(needed)
@@ -114,11 +116,13 @@ final class Sampler {
             cpuUsage = .init(); cpuTemp = .init()
             snapshot.cpu = nil; snapshot.cpuTemp = nil
             snapshot.cpuHistory.clear()
+            snapshot.cpuLevel = .normal
             cpu.reset()
         case .gpu:
             gpuUsage = .init(); gpuTemp = .init()
             snapshot.gpu = nil; snapshot.gpuTemp = nil
             snapshot.gpuHistory.clear()
+            snapshot.gpuLevel = .normal
         case .memory:
             memory = .init()
             snapshot.memory = nil
@@ -154,11 +158,13 @@ final class Sampler {
                 s.cpu = cpuUsage.update(nil)
                 s.cpuHistory.append(nil)
             }
+            s.cpuLevel = Metrics.usageLevel(s.cpuHistory, was: s.cpuLevel)
         }
         if needed.contains(.gpu) {
             let g = gpu.read()
             s.gpu = gpuUsage.update(g)
             s.gpuHistory.append(g)
+            s.gpuLevel = Metrics.usageLevel(s.gpuHistory, was: s.gpuLevel)
         }
         if needed.contains(.cpu) || needed.contains(.gpu) {
             let t = thermal.read(cpu: needed.contains(.cpu), gpu: needed.contains(.gpu))

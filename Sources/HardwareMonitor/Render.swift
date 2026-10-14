@@ -46,6 +46,20 @@ struct Style: Equatable {
 
     private var crit: NSColor { dark ? rgba(0xff, 0x5a, 0x4f) : rgba(0xd9, 0x2d, 0x20) }
 
+    /// Each metric's identity colour for its glyph (bar and panel header) and sparkline: the "Classic monitor" option
+    /// (owner, 2026-10-14), Apple's system colours. Values keep `text(_:)`. Increase Contrast moves each a quarter
+    /// toward fg (lighter in dark, darker in light).
+    func identity(_ g: Column.Glyph) -> NSColor {
+        let c = switch g {
+        case .cpu: dark ? rgba(0x0a, 0x84, 0xff) : rgba(0x00, 0x7a, 0xff)    // blue
+        case .gpu: dark ? rgba(0xbf, 0x5a, 0xf2) : rgba(0xaf, 0x52, 0xde)    // violet
+        case .memory: dark ? rgba(0x30, 0xd1, 0x58) : rgba(0x24, 0x8a, 0x3d) // green
+        case .power: dark ? rgba(0xff, 0xd6, 0x0a) : rgba(0x9a, 0x7b, 0x00)  // yellow
+        case .disk: dark ? rgba(0x64, 0xd2, 0xff) : rgba(0x00, 0x71, 0xa4)   // cyan
+        }
+        return contrast ? c.blended(withFraction: 0.25, of: fg) ?? c : c
+    }
+
     // MARK: Panel tokens (UI/UX Wireframes → Hover panel, deviation 9; DD-9: Increase Contrast raises dim, track and
     // sep; Reduce Transparency makes the background solid)
 
@@ -94,7 +108,7 @@ struct Glance: Equatable {
             value(Column.Value(text: text, unit: unit, level: level, strong: strong), x: 0, line: 0, top: top, style: nil)
         }
         return switch glyph {
-        case .cpu, .gpu: max(w("100", "%"), w("120", "°", .critical, strong: false, top: false))
+        case .cpu, .gpu: max(w("100", "%", .warning), w("120", "°", .critical, strong: false, top: false))
         case .memory: max(w("100", "%", .critical), 22)
         case .power: max(w("188", "W"), w("8.8", "W"), w("−188", "W", top: false)) // the battery's drain (owner, 2026-10-13)
         case .disk: max(w("999", "G", .critical), w("9.9", "T", .critical), w("999", "G", strong: false, top: false),
@@ -123,7 +137,7 @@ struct Glance: Equatable {
         if dev { x += Self.text("DEV", x, Self.devBaseline, Self.devFont, style.dim) + Self.gap }
         for col in columns {
             Self.glyph(col.glyph, in: CGRect(x: x, y: (Self.height - Self.glyphSize) / 2, width: Self.glyphSize, height: Self.glyphSize),
-                       style.fg)
+                       style.identity(col.glyph))
             if col.badge { // the BADGE bolt, 6 × 8.5, 3 pt beyond the glyph's right edge and 2.5 pt above its top
                 Self.bolt(in: CGRect(x: x + Self.glyphSize + 3 - 6, y: (Self.height - Self.glyphSize) / 2 - 2.5,
                                      width: 6, height: 8.5), style.fg)
@@ -444,7 +458,7 @@ final class PanelView: NSView {
     /// (bolt 7 × 10 and 3 pt before it). Returns nothing; the line is 18 pt.
     private static func header(_ glyph: Column.Glyph, _ title: String, word: Run?, bolt: Bool, _ s: Style, x: CGFloat,
                                top: CGFloat, width: CGFloat) {
-        Glance.glyph(glyph, in: CGRect(x: x, y: top + 2, width: 14, height: 14), s.fg)
+        Glance.glyph(glyph, in: CGRect(x: x, y: top + 2, width: 14, height: 14), s.identity(glyph))
         let titleWidth = text(title, font(13, .semibold), s.fg, x: x + 19, top: top, line: 18)
         guard let word else { return }
         let (f, color) = style(word, s, size: 12, weight: .medium)
@@ -468,7 +482,7 @@ final class PanelView: NSView {
         NSAttributedString(string: t.unit, attributes: [.font: unit, .foregroundColor: s.panelDim])
             .draw(at: CGPoint(x: x + w + 3, y: baseline - unit.ascender))
         y += 27 + 6
-        graphic(t.graphic, s, in: CGRect(x: x, y: y, width: inner, height: 20))
+        graphic(t.graphic, s, s.identity(t.glyph), in: CGRect(x: x, y: y, width: inner, height: 20))
         y += 20 + 6
         for row in t.rows {
             var lx = x
@@ -485,13 +499,13 @@ final class PanelView: NSView {
     }
 
     /// The graphic slot: sparkline, gauge, capacity bar or power track; nothing for a missing value or on battery.
-    private static func graphic(_ g: Tile.Graphic, _ s: Style, in r: CGRect) {
+    private static func graphic(_ g: Tile.Graphic, _ s: Style, _ identity: NSColor, in r: CGRect) {
         let bar = CGRect(x: r.minX, y: r.midY - 3, width: r.width, height: 6) // 6 pt, radius 3, centred
         func rounded(_ rect: CGRect) -> NSBezierPath { NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3) }
         func levelFill(_ l: Level) -> NSColor { l == .normal ? s.fg.withAlphaComponent(0.7) : s.fill(l) }
         switch g {
         case .none: break
-        case .spark(let samples): spark(samples, s.fg, in: r)
+        case .spark(let samples): spark(samples, identity, in: r)
         case .gauge(let level): // three equal segments 3 pt apart: Normal lights 1, Warning 2, Critical 3
             let lit = level == .normal ? 1 : level == .warning ? 2 : 3
             let w = (r.width - 6) / 3
